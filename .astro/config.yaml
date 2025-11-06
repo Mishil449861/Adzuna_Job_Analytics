@@ -1,0 +1,5 @@
+project:
+    name: airflow
+webserver:
+    allowed_hosts:
+        - '*'

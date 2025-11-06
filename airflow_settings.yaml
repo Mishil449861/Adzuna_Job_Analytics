@@ -1,0 +1,9 @@
+project:
+  name: airflow
+
+airflow:
+  webserver:
+    enable_proxy_fix: true
+    base_url: /
+    # Add a fixed secret key for session cookies
+    secret_key: "a-very-strong-and-permanent-secret-key-for-dev"
