@@ -107,7 +107,7 @@ def skill_extraction_dag():
 
         # This is the correct, absolute path *inside the container*
         # as defined by your Dockerfile
-        key_path = f"/usr/local/airflow/include/{NEW_KEY_FILENAME}"
+        key_path = f"/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
 
         try:
             # Create credentials from the file
