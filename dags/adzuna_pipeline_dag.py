@@ -63,7 +63,7 @@ def adzuna_pipeline_merge():
 
     @task
     def get_adzuna_secrets() -> dict:
-        key_path = "/usr/local/airflow/include/ba882-team4-474802-964ab07e73f5.json"
+        key_path = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
         credentials = service_account.Credentials.from_service_account_file(key_path)
         client = secretmanager.SecretManagerServiceClient(credentials=credentials)
 

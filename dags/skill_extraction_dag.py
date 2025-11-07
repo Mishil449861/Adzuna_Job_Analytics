@@ -111,7 +111,7 @@ def skill_extraction_dag():
         # Build a robust path to the include folder, relative to this DAG file
         # This is safer than a hardcoded path.
         dag_dir = os.path.dirname(os.path.abspath(__file__))
-        key_path = os.path.join(dag_dir, "../include/ba882-team4-474802-964ab07e73f5.json")
+        key_path = os.path.join(dag_dir, "../include/ba882-team4-474802-bee53a65f2ac.json")
 
         # Create credentials from the file
         credentials = service_account.Credentials.from_service_account_file(key_path)
