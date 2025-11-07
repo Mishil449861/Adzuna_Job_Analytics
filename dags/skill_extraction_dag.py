@@ -107,9 +107,11 @@ def skill_extraction_dag():
 
         # This is the correct, absolute path *inside the container*
         # as defined by your Dockerfile
+        print(f"Connecting to BigQuery using service account...")
         key_path = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
         credentials = service_account.Credentials.from_service_account_file(key_path)
-        client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+        client = bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
+        print("Successfully created BigQuery client.")
 
         print("Successfully created BigQuery client.")
         # --- END OF CORRECTED BLOCK ---
