@@ -8,5 +8,4 @@ airflow-webserver.pid
 webserver_config.py
 airflow.cfg
 airflow.db
-include/ba882-team4-474802-964ab07e73f5.json:1
-/home/mishil31/airflow/include/ba882-team4-474802-964ab07e73f5.json
+*.json

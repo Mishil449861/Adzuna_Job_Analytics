@@ -1,23 +1,17 @@
 # FILE: dags/skill_extraction_dag.py
 #
-# This is the corrected, final DAG.
-# It now authenticates using your service account JSON file
-# instead of the default Airflow connection.
+# This is the final, corrected version.
+# It uses the correct *absolute path* for the JSON key file.
 
 import pendulum
 import spacy
-import os  # <-- ADDED THIS IMPORT
+import os
 from spacy.pipeline import EntityRuler
 from google.cloud import bigquery
-from google.oauth2 import service_account  # <-- ADDED THIS IMPORT
-
-# We no longer need the BigQueryHook
-# from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+from google.oauth2 import service_account
 from airflow.decorators import dag, task
 
-
 # --- 1. DEFINE YOUR SKILL LIST ---
-# (Comprehensive skill list from before)
 SKILL_LIST = [
     # --- Core Programming & Scripting ---
     "Python", "SQL", "R", "Java", "C++", "C#", "Scala", "Go", "Bash", "Perl",
@@ -64,13 +58,16 @@ DEST_TABLE_ID = f"{GCP_PROJECT_ID}.{GCP_DATASET_ID}.job_skills"
 MODEL_VERSION = "entity_ruler_v1.1_comprehensive"
 
 # Column names in your 'jobs' table
-SOURCE_ID_COL = "job_id"
+SOURCE_ID_COL = "adzuna_id"
 SOURCE_TEXT_COL = "description"
+
+# This must be the *exact* filename of your new key
+NEW_KEY_FILENAME = "ba882-team4-474802-bee53a65f2ac.json"
 
 
 @dag(
     dag_id="skill_extraction_pipeline",
-    schedule_interval="0 0 */3 * *",
+    schedule="0 0 */3 * *",
     start_date=pendulum.datetime(2025, 11, 1, tz="UTC"),
     catchup=False,
     tags=["skills", "spacy", "bigquery", "nlp"],
@@ -105,23 +102,17 @@ def skill_extraction_dag():
         """
         nlp = load_spacy_model_with_ruler()
 
-        # --- THIS IS THE MODIFIED AUTHENTICATION BLOCK ---
+        # --- THIS IS THE CORRECTED AUTHENTICATION BLOCK ---
         print(f"Connecting to BigQuery using service account...")
 
-        # Build a robust path to the include folder, relative to this DAG file
-        # This is safer than a hardcoded path.
-        dag_dir = os.path.dirname(os.path.abspath(__file__))
-        key_path = os.path.join(dag_dir, "/include/ba882-team4-474802-964ab07e73f5.json")
-
-        # Create credentials from the file
+        # This is the correct, absolute path *inside the container*
+        # as defined by your Dockerfile
+        key_path = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
         credentials = service_account.Credentials.from_service_account_file(key_path)
-
-        # Create the BigQuery client, passing in the credentials
-        # This is the correct client to use for BigQuery operations.
-        client = bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
+        client = secretmanager.SecretManagerServiceClient(credentials=credentials)
 
         print("Successfully created BigQuery client.")
-        # --- END OF MODIFIED BLOCK ---
+        # --- END OF CORRECTED BLOCK ---
 
         # 1. Read data from source table
         read_query = f"""
