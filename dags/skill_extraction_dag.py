@@ -156,7 +156,6 @@ def skill_extraction_dag():
                     "source_job_id": job_id,
                     "skill_name": skill_name,
                     "extraction_date": extraction_time.to_iso8601_string(),
-                    "model_version": MODEL_VERSION
                 })
 
             # 4. Insert in batches
