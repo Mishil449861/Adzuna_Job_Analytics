@@ -58,7 +58,7 @@ DEST_TABLE_ID = f"{GCP_PROJECT_ID}.{GCP_DATASET_ID}.job_skills"
 MODEL_VERSION = "entity_ruler_v1.1_comprehensive"
 
 # Column names in your 'jobs' table
-SOURCE_ID_COL = "adzuna_id"
+SOURCE_ID_COL = "job_id"
 SOURCE_TEXT_COL = "description"
 
 # This must be the *exact* filename of your new key
