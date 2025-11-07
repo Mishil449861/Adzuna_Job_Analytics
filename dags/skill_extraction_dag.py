@@ -70,7 +70,7 @@ SOURCE_TEXT_COL = "description"
 
 @dag(
     dag_id="skill_extraction_pipeline",
-    schedule_interval="0 0 */3 * *",
+    schedule="0 0 */3 * *",  # <-- THIS IS THE FIX (was schedule_interval)
     start_date=pendulum.datetime(2025, 11, 1, tz="UTC"),
     catchup=False,
     tags=["skills", "spacy", "bigquery", "nlp"],
@@ -111,7 +111,7 @@ def skill_extraction_dag():
         # Build a robust path to the include folder, relative to this DAG file
         # This is safer than a hardcoded path.
         dag_dir = os.path.dirname(os.path.abspath(__file__))
-        key_path = os.path.join(dag_dir, "/include/ba882-team4-474802-964ab07e73f5.json")
+        key_path = os.path.join(dag_dir, "../include/ba882-team4-474802-964ab07e73f5.json")
 
         # Create credentials from the file
         credentials = service_account.Credentials.from_service_account_file(key_path)
