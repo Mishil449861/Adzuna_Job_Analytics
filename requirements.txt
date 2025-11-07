@@ -4,3 +4,5 @@ pandas
 pyarrow
 requests
 google-cloud-secret-manager
+spacy
+google-cloud-bigquery
