@@ -5,7 +5,7 @@
 
 import pendulum
 from airflow.decorators import dag, task
-from airflow.providers.http.operators.http import SimpleHttpOperator
+from airflow.providers.http.operators.http import HttpOperator
 
 # --- Added imports for key file auth ---
 import os
@@ -81,7 +81,7 @@ def job_clustering_pipeline():
 
     # Task 2: Train Model
     # This task calls the HTTP endpoint of your deployed Cloud Function.
-    trigger_model_training = SimpleHttpOperator(
+    trigger_model_training = HttpOperator(
         task_id="trigger_model_training",
         http_conn_id=HTTP_CONN_ID,
         method="POST",
