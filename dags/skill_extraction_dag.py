@@ -58,7 +58,7 @@ DEST_TABLE_ID = f"{GCP_PROJECT_ID}.{GCP_DATASET_ID}.job_skills"
 MODEL_VERSION = "entity_ruler_v1.1_comprehensive"
 
 # Column names in your 'jobs' table
-SOURCE_ID_COL = "adzuna_id"
+SOURCE_ID_COL = "job_id"
 SOURCE_TEXT_COL = "description"
 
 # This must be the *exact* filename of your new key
@@ -107,9 +107,11 @@ def skill_extraction_dag():
 
         # This is the correct, absolute path *inside the container*
         # as defined by your Dockerfile
+        print(f"Connecting to BigQuery using service account...")
         key_path = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
         credentials = service_account.Credentials.from_service_account_file(key_path)
-        client = secretmanager.SecretManagerServiceClient(credentials=credentials)
+        client = bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
+        print("Successfully created BigQuery client.")
 
         print("Successfully created BigQuery client.")
         # --- END OF CORRECTED BLOCK ---
@@ -154,7 +156,6 @@ def skill_extraction_dag():
                     "source_job_id": job_id,
                     "skill_name": skill_name,
                     "extraction_date": extraction_time.to_iso8601_string(),
-                    "model_version": MODEL_VERSION
                 })
 
             # 4. Insert in batches
