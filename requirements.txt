@@ -11,3 +11,4 @@ google-cloud-bigquery
 google-cloud-storage
 scikit-learn
 joblib
+apache-airflow-providers-http
