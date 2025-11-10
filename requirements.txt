@@ -6,3 +6,8 @@ requests
 google-cloud-secret-manager
 spacy
 google-cloud-bigquery
+functions-framework
+google-cloud-bigquery
+google-cloud-storage
+scikit-learn
+joblib
