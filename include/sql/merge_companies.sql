@@ -1,11 +1,12 @@
-MERGE INTO `ba882-team4-474802.ba882_jobs.companies` AS T
+MERGE INTO `ba882-team4-474802.ba882_jobs.companies` AS target
 USING (
-  -- Select distinct, non-null companies from the staging table
-  SELECT DISTINCT company_name
-  FROM `ba882-team4-474802.ba882_jobs.staging_companies`
-  WHERE company_name IS NOT NULL
-) AS S
-ON T.company_name = S.company_name
-WHEN NOT MATCHED BY TARGET THEN
-  INSERT (company_name)
-  VALUES (S.company_name);
+    -- Get unique, non-null names from staging
+    SELECT DISTINCT company_name
+    FROM `ba882-team4-474802.ba882_jobs.staging_companies`
+    WHERE company_name IS NOT NULL
+) AS source
+ON target.company_name = source.company_name
+-- When it's a new company, insert its name AND a new primary key
+WHEN NOT MATCHED THEN
+  INSERT (company_name, company_id)
+  VALUES (source.company_name, GENERATE_UUID());
