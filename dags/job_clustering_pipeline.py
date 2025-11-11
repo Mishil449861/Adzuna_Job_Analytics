@@ -85,7 +85,7 @@ def job_clustering_pipeline():
         task_id="trigger_model_training",
         http_conn_id=HTTP_CONN_ID,
         method="POST",
-        endpoint="", # Endpoint is the *path* part of the URL, or empty if URL is in Host
+        endpoint="train-job-cluster", # Endpoint is the *path* part of the URL, or empty if URL is in Host
         log_response=True,
     )
 
