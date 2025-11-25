@@ -11,6 +11,8 @@ GCP_DATASET_ID = "ba882_jobs"
 GCP_CONN_ID = "gcp_default"
 
 # Table References
+# We remove the backticks here to keep the string clean. 
+# We will handle formatting inside the tasks.
 TABLE_COMPANIES = f"{GCP_PROJECT_ID}.{GCP_DATASET_ID}.companies"
 TABLE_H1B = f"{GCP_PROJECT_ID}.{GCP_DATASET_ID}.company_sponsorship_status"
 TABLE_MAPPING = f"{GCP_PROJECT_ID}.{GCP_DATASET_ID}.temp_name_mapping"
@@ -32,7 +34,6 @@ def normalize_company_name(name):
     clean = re.sub(r'\([^)]*\)', '', clean)
     
     # 3. Remove common legal suffixes
-    # Note: 'cleanco' library does this even better, but this regex works without extra installs
     suffixes = [
         r'\binc\.?\b', r'\bllc\.?\b', r'\bltd\.?\b', r'\bcorp\.?\b', 
         r'\bcorporation\b', r'\bco\.?\b', r'\bcompany\b', r'\bpllc\b', 
@@ -64,11 +65,20 @@ def company_matching_pipeline():
         """
         hook = BigQueryHook(gcp_conn_id=GCP_CONN_ID)
         
+        # --- THE FIX IS HERE ---
+        # We added dialect='standard' to prevent the "Invalid Project ID" error
+        
         # 1. Get distinct Adzuna Names
-        df_adzuna = hook.get_pandas_df(f"SELECT DISTINCT company_name FROM `{TABLE_COMPANIES}` WHERE company_name IS NOT NULL")
+        df_adzuna = hook.get_pandas_df(
+            sql=f"SELECT DISTINCT company_name FROM `{TABLE_COMPANIES}` WHERE company_name IS NOT NULL",
+            dialect='standard'
+        )
         
         # 2. Get distinct H1B Names
-        df_h1b = hook.get_pandas_df(f"SELECT DISTINCT employer_name FROM `{TABLE_H1B}` WHERE employer_name IS NOT NULL")
+        df_h1b = hook.get_pandas_df(
+            sql=f"SELECT DISTINCT employer_name FROM `{TABLE_H1B}` WHERE employer_name IS NOT NULL",
+            dialect='standard'
+        )
         
         print(f"Fetched {len(df_adzuna)} Adzuna names and {len(df_h1b)} H1B names.")
 
@@ -77,7 +87,6 @@ def company_matching_pipeline():
         df_h1b['clean_name'] = df_h1b['employer_name'].apply(normalize_company_name)
 
         # 4. Perform the Match (Inner Join on the normalized name)
-        # This connects 'Google' (Adzuna) to 'Google LLC' (H1B) because both clean to 'google'
         merged_df = pd.merge(
             df_adzuna, 
             df_h1b, 
@@ -90,14 +99,13 @@ def company_matching_pipeline():
         
         print(f"Found {len(mapping_df)} matches using normalization.")
 
-        # 5. Upload this mapping back to BigQuery so SQL can use it
-        # Using 'replace' to overwrite previous day's mapping
+        # 5. Upload this mapping back to BigQuery
         if not mapping_df.empty:
-            # Need to use a client to upload dataframe
             client = hook.get_client()
+            # We use the DataFrame directly to load the table
             job_config = client.load_table_from_dataframe(mapping_df, TABLE_MAPPING)
             job_config.result() # Wait for completion
-            print("Mapping table uploaded successfully.")
+            print(f"Mapping table uploaded successfully to {TABLE_MAPPING}.")
         else:
             print("No matches found. Table not updated.")
 
@@ -118,19 +126,14 @@ def company_matching_pipeline():
                         COALESCE(h.ever_sponsored_h1b, FALSE) as is_sponsor,
                         h.last_updated_fiscal_year,
                         
-                        -- Flag to show how we found them
                         CASE 
                             WHEN m.employer_name IS NOT NULL THEN 'Normalized Match'
                             ELSE 'No Match'
                         END as match_method
 
                     FROM `{TABLE_COMPANIES}` c
-                    
-                    -- 1. Join to our Python-generated mapping table
                     LEFT JOIN `{TABLE_MAPPING}` m
                         ON c.company_name = m.company_name
-                    
-                    -- 2. Join to the H1B table using the MAPPED name (which links 'Google' to 'Google LLC')
                     LEFT JOIN `{TABLE_H1B}` h
                         ON m.employer_name = h.employer_name
                 """,
@@ -140,7 +143,6 @@ def company_matching_pipeline():
         gcp_conn_id=GCP_CONN_ID,
     )
 
-    # Dependency: Build map first, then run SQL
     build_mapping_table() >> create_final_table
 
 company_matching_pipeline()
