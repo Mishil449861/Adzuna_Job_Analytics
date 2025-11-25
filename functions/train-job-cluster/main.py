@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import re
 import string
+import pickle  # <--- REQUIRED FIX
 from datetime import datetime
 from google.cloud import bigquery, storage
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -105,7 +106,6 @@ def train_job_cluster(request):
 
     print("Saved job_clusters")
 
-
     # Extract TF-IDF names
     print("Extracting top TF-IDF terms...")
     cluster_terms = extract_top_terms(X, terms, labels)
@@ -126,7 +126,6 @@ def train_job_cluster(request):
 
     print("Saved cluster_registry")
 
-
     # Save model metrics
     df_metrics = pd.DataFrame([{
         "model_version": model_version,
@@ -144,7 +143,6 @@ def train_job_cluster(request):
     )
 
     print("Saved model_metrics")
-
 
     # Save artifacts to Cloud Storage
     print("Saving model artifacts to GCS...")
