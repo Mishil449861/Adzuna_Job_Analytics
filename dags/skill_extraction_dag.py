@@ -276,7 +276,6 @@ def skill_extraction_dag():
         update_skills_bridge, 
         update_company_presence, 
         update_category_standards,
-        update_category_industry
     ]
 
 skill_extraction_dag()
