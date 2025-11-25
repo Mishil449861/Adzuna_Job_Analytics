@@ -55,7 +55,7 @@ def train_cluster_model(request):
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M")
 
     bq = bigquery.Client(project=PROJECT_ID)
-    storage = storage.Client(project=PROJECT_ID)
+    storage_client = storage.Client(project=PROJECT_ID)
 
     # -------------------------------------------------------------------
     # 1. LOAD DATA
@@ -92,12 +92,10 @@ def train_cluster_model(request):
     # -------------------------------------------------------------------
     # 3. TRAIN MODELS
     # -------------------------------------------------------------------
-    # A. KMeans
     kmeans = KMeans(n_clusters=NUM_CLUSTERS, n_init=10, random_state=42)
     labels_kmeans = kmeans.fit_predict(tfidf_matrix)
     score_kmeans = silhouette_score(tfidf_matrix, labels_kmeans, sample_size=5000)
 
-    # B. Hierarchical (SVD-reduced)
     svd = TruncatedSVD(n_components=40, random_state=42)
     reduced = svd.fit_transform(tfidf_matrix)
 
@@ -106,8 +104,8 @@ def train_cluster_model(request):
         labels_hier = hier.fit_predict(reduced)
         score_hier = silhouette_score(reduced, labels_hier)
     else:
-        score_hier = -1
         labels_hier = None
+        score_hier = -1
 
     # -------------------------------------------------------------------
     # 4. SELECT WINNER
@@ -134,31 +132,37 @@ def train_cluster_model(request):
     num_clusters = NUM_CLUSTERS
 
     # -------------------------------------------------------------------
-    # 5. EXTRACT CLUSTER LABELS (TOP TERMS)
+    # 5. EXTRACT TOP TERMS (CLUSTER LABELING)
     # -------------------------------------------------------------------
     cluster_terms = extract_cluster_terms(tfidf_matrix, winner_labels, vectorizer)
 
+    # -------------------------------------------------------------------
+    # 5B. FIX: INSERT cluster_registry USING WRITE_APPEND (NOT TRUNCATE)
+    # -------------------------------------------------------------------
     registry_rows = [
         {
-            "cluster_id": cid,
+            "model_version": MODEL_VERSION,
+            "cluster_id": int(cid),
             "cluster_name": f"{winner_name} Cluster {cid}",
             "top_terms": terms,
-            "model_version": MODEL_VERSION,
+            "num_clusters": int(num_clusters),
+            "num_jobs_trained": int(num_jobs_trained),
             "updated_at": datetime.utcnow().isoformat()
         }
         for cid, terms in cluster_terms.items()
     ]
 
-    bq.load_table_from_json(registry_rows, REGISTRY_TABLE).result()
+    registry_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    bq.load_table_from_json(registry_rows, REGISTRY_TABLE, job_config=registry_cfg).result()
 
     # -------------------------------------------------------------------
-    # 6. WRITE CLUSTER ASSIGNMENTS
+    # 6. WRITE CLUSTER ASSIGNMENTS (TRUNCATE OK)
     # -------------------------------------------------------------------
     job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     bq.load_table_from_dataframe(grouped, CLUSTER_TABLE, job_cfg).result()
 
     # -------------------------------------------------------------------
-    # 7. WRITE METRICS
+    # 7. FIX: INSERT model_metrics USING WRITE_APPEND
     # -------------------------------------------------------------------
     metric_row = [{
         "model_version": MODEL_VERSION,
@@ -169,6 +173,7 @@ def train_cluster_model(request):
         "num_jobs_trained": int(num_jobs_trained)
     }]
 
-    bq.load_table_from_json(metric_row, METRICS_TABLE).result()
+    metrics_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
+    bq.load_table_from_json(metric_row, METRICS_TABLE, metrics_cfg).result()
 
     return (f"Done. Winner: {winner_name} (Score={winner_score:.4f})", 200)
