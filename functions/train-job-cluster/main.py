@@ -1,178 +1,157 @@
+import json
 import functions_framework
 import pandas as pd
 import numpy as np
+import re
+import string
 from datetime import datetime
-
 from google.cloud import bigquery, storage
-
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import KMeans, AgglomerativeClustering
+from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-from sklearn.decomposition import TruncatedSVD
 
-# --- CONFIG ---
+
 PROJECT_ID = "ba882-team4-474802"
-DATASET_ID = "ba882_jobs"
-
-JOBS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.jobs"
-SKILLS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.job_skills"
-CLUSTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.job_clusters"
-REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.cluster_registry"
-METRICS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.model_metrics"
-
-QUALITY_THRESHOLD = 0.03
-NUM_CLUSTERS = 8
+DATASET = "ba882_jobs"
+BUCKET_NAME = "adzuna-bucket"  # your model artifact bucket
 
 
-# ----------------------------------------------------
-# Helper → Extract top terms per cluster for naming
-# ----------------------------------------------------
-def extract_cluster_terms(tfidf_matrix, labels, vectorizer, top_n=8):
-    feature_names = np.array(vectorizer.get_feature_names_out())
-    clusters = {}
+# ----------------------------
+# Helpers
+# ----------------------------
 
-    for cluster_id in range(NUM_CLUSTERS):
-        mask = labels == cluster_id
-        if mask.sum() == 0:
-            clusters[cluster_id] = "Undefined"
-            continue
-
-        centroid = tfidf_matrix[mask].mean(axis=0)
-        centroid = np.asarray(centroid).ravel()
-
-        top_indices = centroid.argsort()[::-1][:top_n]
-        top_terms = feature_names[top_indices]
-
-        clusters[cluster_id] = ", ".join(top_terms)
-
-    return clusters
+def clean(text):
+    if not isinstance(text, str):
+        return ""
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
-# ----------------------------------------------------
-# MAIN ENTRYPOINT
-# ----------------------------------------------------
+def extract_top_terms(tfidf_matrix, terms, labels, k=10):
+    """Return the top TF-IDF words per cluster."""
+    top_terms = {}
+    for cluster_id in range(max(labels) + 1):
+        cluster_indices = np.where(labels == cluster_id)[0]
+        centroid = tfidf_matrix[cluster_indices].mean(axis=0)
+        top_idx = np.asarray(centroid).ravel().argsort()[-k:][::-1]
+        words = [terms[i] for i in top_idx]
+        top_terms[cluster_id] = ", ".join(words)
+    return top_terms
+
+
+# -------------------------------------
+# CLOUD FUNCTION ENTRYPOINT
+# -------------------------------------
 @functions_framework.http
-def train_cluster_model(request):
-    run_id = datetime.utcnow().strftime("%Y%m%d-%H%M")
+def train_job_cluster(request):
+
+    print("Starting job clustering model training...")
 
     bq = bigquery.Client(project=PROJECT_ID)
+    storage_client = storage.Client(project=PROJECT_ID)
 
-    # ----------------------------------------------------
-    # 1. LOAD DATA
-    # ----------------------------------------------------
-    try:
-        jobs_df = bq.query(
-            f"SELECT job_id, title FROM `{JOBS_TABLE}`"
-        ).to_dataframe()
+    # Load jobs
+    print("Loading data from BigQuery...")
+    df_jobs = bq.query(f"""
+        SELECT job_id, job_title, job_description
+        FROM `{PROJECT_ID}.{DATASET}.jobs`
+        WHERE job_description IS NOT NULL
+    """).to_dataframe()
 
-        skills_df = bq.query(
-            f"SELECT source_job_id, skill_name FROM `{SKILLS_TABLE}`"
-        ).to_dataframe()
+    if df_jobs.empty:
+        return ("No job data available.", 200)
 
-    except Exception as e:
-        return (f"Load Error: {e}", 500)
+    print(f"Loaded {len(df_jobs)} rows.")
 
-    merged = jobs_df.merge(skills_df, left_on="job_id", right_on="source_job_id")
-    grouped = merged.groupby(["job_id", "title"])["skill_name"].apply(list).reset_index()
+    # Clean text
+    print("Cleaning text...")
+    df_jobs["clean_text"] = df_jobs["job_title"].fillna("") + " " + df_jobs["job_description"].fillna("")
+    df_jobs["clean_text"] = df_jobs["clean_text"].apply(clean)
 
-    processed_text = [
-        " ".join(row.skill_name).lower() + " " + row.title.lower()
-        for row in grouped.itertuples()
-    ]
+    # Vectorize
+    print("Vectorizing with TF-IDF...")
+    vectorizer = TfidfVectorizer(max_features=5000, stop_words="english")
+    X = vectorizer.fit_transform(df_jobs["clean_text"])
+    terms = vectorizer.get_feature_names_out()
 
-    # ----------------------------------------------------
-    # 2. TF-IDF
-    # ----------------------------------------------------
-    vectorizer = TfidfVectorizer(
-        max_features=1000,
-        stop_words="english",
-        min_df=0.01,
-        max_df=0.85
+    # Train KMeans
+    num_clusters = 10
+    print(f"Training KMeans with k={num_clusters}...")
+    kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init="auto")
+    labels = kmeans.fit_predict(X)
+
+    silhouette = float(silhouette_score(X, labels))
+    print(f"Silhouette Score = {silhouette}")
+
+    # Create model version
+    model_version = f"kmeans_k{num_clusters}_{datetime.utcnow().strftime('%Y%m%d')}"
+
+    # Save cluster assignments
+    print("Preparing job_clusters output...")
+    df_clusters = pd.DataFrame({
+        "job_id": df_jobs["job_id"],
+        "cluster_id": labels,
+        "model_version": model_version,
+        "processed_at": datetime.utcnow()
+    })
+
+    df_clusters.to_gbq(
+        f"{PROJECT_ID}.{DATASET}.job_clusters",
+        project_id=PROJECT_ID,
+        if_exists="replace"
     )
-    tfidf_matrix = vectorizer.fit_transform(processed_text)
 
-    # ----------------------------------------------------
-    # 3. TRAIN MODELS
-    # ----------------------------------------------------
-    kmeans = KMeans(n_clusters=NUM_CLUSTERS, n_init=10, random_state=42)
-    labels_kmeans = kmeans.fit_predict(tfidf_matrix)
-    score_kmeans = silhouette_score(tfidf_matrix, labels_kmeans, sample_size=5000)
+    print("Saved job_clusters")
 
-    svd = TruncatedSVD(n_components=40, random_state=42)
-    reduced = svd.fit_transform(tfidf_matrix)
 
-    if len(reduced) <= 5000:
-        hier = AgglomerativeClustering(n_clusters=NUM_CLUSTERS)
-        labels_hier = hier.fit_predict(reduced)
-        score_hier = silhouette_score(reduced, labels_hier)
-    else:
-        labels_hier = None
-        score_hier = -1
+    # Extract TF-IDF names
+    print("Extracting top TF-IDF terms...")
+    cluster_terms = extract_top_terms(X, terms, labels)
 
-    # ----------------------------------------------------
-    # 4. MODEL SELECTION
-    # ----------------------------------------------------
-    if score_hier > score_kmeans:
-        winner_name = "Hierarchical"
-        winner_score = score_hier
-        winner_labels = labels_hier
-    else:
-        winner_name = "KMeans"
-        winner_score = score_kmeans
-        winner_labels = labels_kmeans
+    df_registry = pd.DataFrame({
+        "cluster_id": list(cluster_terms.keys()),
+        "cluster_name": [f"Cluster {cid}" for cid in cluster_terms.keys()],
+        "top_terms": [cluster_terms[cid] for cid in cluster_terms.keys()],
+        "model_version": model_version,
+        "updated_at": datetime.utcnow()
+    })
 
-    MODEL_VERSION = f"{winner_name}_v_{run_id}"
+    df_registry.to_gbq(
+        f"{PROJECT_ID}.{DATASET}.cluster_registry",
+        project_id=PROJECT_ID,
+        if_exists="replace"
+    )
 
-    grouped["cluster_id"] = winner_labels
-    grouped["model_version"] = MODEL_VERSION
-    grouped["processed_at"] = datetime.utcnow()
+    print("Saved cluster_registry")
 
-    num_jobs_trained = len(grouped)
-    num_clusters = NUM_CLUSTERS
 
-    # ----------------------------------------------------
-    # 5. CLUSTER NAMING (TOP TERMS)
-    # ----------------------------------------------------
-    cluster_terms = extract_cluster_terms(tfidf_matrix, winner_labels, vectorizer)
+    # Save model metrics
+    df_metrics = pd.DataFrame([{
+        "model_version": model_version,
+        "run_date": datetime.utcnow(),
+        "silhouette_score": silhouette,
+        "method": "kmeans",
+        "num_clusters": num_clusters,
+        "num_jobs_trained": len(df_jobs)
+    }])
 
-    # ----------------------------------------------------
-    # 5B. FIXED → ALWAYS APPEND TO cluster_registry
-    # ----------------------------------------------------
-    registry_rows = [
-        {
-            "model_version": MODEL_VERSION,
-            "cluster_id": int(cid),
-            "cluster_name": f"{winner_name} Cluster {cid}",
-            "top_terms": terms,
-            "num_clusters": int(num_clusters),
-            "num_jobs_trained": int(num_jobs_trained),
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        for cid, terms in cluster_terms.items()
-    ]
+    df_metrics.to_gbq(
+        f"{PROJECT_ID}.{DATASET}.model_metrics",
+        project_id=PROJECT_ID,
+        if_exists="append"
+    )
 
-    registry_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    bq.load_table_from_json(registry_rows, REGISTRY_TABLE, job_config=registry_cfg).result()
+    print("Saved model_metrics")
 
-    # ----------------------------------------------------
-    # 6. WRITE CLUSTER ASSIGNMENTS (TRUNCATE)
-    # ----------------------------------------------------
-    job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    bq.load_table_from_dataframe(grouped, CLUSTER_TABLE, job_cfg).result()
 
-    # ----------------------------------------------------
-    # 7. FIXED → ALWAYS APPEND TO model_metrics
-    # ----------------------------------------------------
-    metrics_row = [{
-        "model_version": MODEL_VERSION,
-        "run_date": datetime.utcnow().isoformat(),
-        "silhouette_score": float(winner_score),
-        "method": winner_name,
-        "num_clusters": int(num_clusters),
-        "num_jobs_trained": int(num_jobs_trained)
-    }]
+    # Save artifacts to Cloud Storage
+    print("Saving model artifacts to GCS...")
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blob = bucket.blob(f"models/{model_version}/kmeans.pkl")
+    blob.upload_from_string(pickle.dumps(kmeans))
 
-    metrics_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    bq.load_table_from_json(metrics_row, METRICS_TABLE, metrics_cfg).result()
+    print(f"Model artifacts saved under {model_version}")
 
-    return (f"Done. Winner: {winner_name} (Score={winner_score:.4f})", 200)
+    return (f"Success: Processed {len(df_jobs)} jobs. Model version: {model_version}.", 200)
