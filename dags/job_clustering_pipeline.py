@@ -38,8 +38,8 @@ OPTIONS (
 
 @dag(
     dag_id="job_clustering_pipeline",
-    # Runs 3 hours after the skill_extraction_pipeline
-    schedule="0 3 */3 * *",
+    # Runs daily after the skill_extraction_pipeline
+    schedule="0 0 * * *",
     start_date=pendulum.datetime(2025, 11, 1, tz="UTC"),
     catchup=False,
     tags=["ml", "clustering", "bigquery"],
