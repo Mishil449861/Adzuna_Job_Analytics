@@ -1,97 +1,99 @@
-# FILE: dags/job_clustering_pipeline.py
-#
-# This snippet replaces the BigQueryInsertJobOperator with a
-# Python task to use your service account key file for auth.
-
 import pendulum
+import os
 from airflow.decorators import dag, task
 from airflow.providers.http.operators.http import HttpOperator
-
-# --- Added imports for key file auth ---
-import os
 from google.cloud import bigquery
 from google.oauth2 import service_account
-# ---
 
 # --- Configuration ---
 GCP_PROJECT_ID = "ba882-team4-474802"
 BQ_DATASET_NAME = "ba882_jobs"
-HTTP_CONN_ID = "cloud_function_train_cluster" # You must create this
-
-# This must be the *exact* filename of your new key
+HTTP_CONN_ID = "cloud_function_train_cluster" 
 NEW_KEY_FILENAME = "ba882-team4-474802-bee53a65f2ac.json"
 
-# This is the SQL from Phase 1
+# 1. The Job Clusters Table 
+# UPDATE: Changed 'seniority_level' to 'seniority' to match your Python DataFrame
 CREATE_CLUSTER_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS `{GCP_PROJECT_ID}.{BQ_DATASET_NAME}.job_clusters`
 (
   job_id STRING,
   cluster_id INT64,
-  model_version STRING,
+  seniority STRING, -- Matches df['seniority'] in main.py
   processed_at TIMESTAMP
 )
 PARTITION BY DATE(processed_at)
 OPTIONS (
-  description="Stores the K-Means cluster assignment for each job based on its skills."
+  description="Stores the TF-IDF + K-Means cluster assignment and seniority tag for each job."
+);
+"""
+
+# 2. The Cluster Registry
+CREATE_REGISTRY_SQL = f"""
+CREATE TABLE IF NOT EXISTS `{GCP_PROJECT_ID}.{BQ_DATASET_NAME}.cluster_registry`
+(
+  cluster_id INT64,
+  cluster_name STRING,
+  top_terms STRING,
+  updated_at TIMESTAMP
+)
+OPTIONS (
+  description="Auto-generated labels for job clusters (e.g., 'Senior Data Engineer')."
 );
 """
 
 @dag(
     dag_id="job_clustering_pipeline",
-    # Runs daily after the skill_extraction_pipeline
-    schedule="0 0 * * *",
+    schedule="0 0 * * *", # Runs DAILY
     start_date=pendulum.datetime(2025, 11, 1, tz="UTC"),
     catchup=False,
     tags=["ml", "clustering", "bigquery"],
 )
 def job_clustering_pipeline():
     """
-    DAG to orchestrate the ML model training pipeline.
-    1. Ensures the output table exists.
-    2. Triggers a Cloud Function to train the K-Means model.
+    Orchestrates daily ML retraining.
+    1. Checks/Creates BigQuery tables.
+    2. Triggers Cloud Function to run TF-IDF & K-Means.
     """
 
-    # --- Task 1: Setup Schema (MODIFIED to use key file) ---
     @task
     def setup_schema():
         """
-        Ensures the job_clusters table exists in BigQuery.
-        This version authenticates using a service account JSON file.
+        Ensures both the cluster assignment table and the label registry exist.
         """
-        print("Ensuring cluster table exists...")
-        
-        # This is the correct, absolute path *inside the container*
+        print("Ensuring ML tables exist...")
         key_path = f"/usr/local/airflow/include/{NEW_KEY_FILENAME}"
 
-        try:
-            credentials = service_account.Credentials.from_service_account_file(key_path)
-        except FileNotFoundError:
-            print(f"ERROR: Key file not found at {key_path}")
-            print("Please ensure the Dockerfile COPY command is correct.")
-            raise
+        if not os.path.exists(key_path):
+            raise FileNotFoundError(f"Critical: Key file missing at {key_path}")
 
+        credentials = service_account.Credentials.from_service_account_file(key_path)
         client = bigquery.Client(credentials=credentials, project=GCP_PROJECT_ID)
 
         try:
-            client.query(CREATE_CLUSTER_TABLE_SQL).result()  # Wait for job to complete
-            print(f"Successfully ensured table {BQ_DATASET_NAME}.job_clusters exists.")
+            # Create/Check Main Table
+            client.query(CREATE_CLUSTER_TABLE_SQL).result()
+            print("Checked job_clusters table.")
+            
+            # Create/Check Registry Table
+            client.query(CREATE_REGISTRY_SQL).result()
+            print("Checked cluster_registry table.")
+            
         except Exception as e:
-            print(f"Error executing schema setup query: {e}")
+            print(f"Schema setup failed: {e}")
             raise
 
-    # Task 2: Train Model
-    # This task calls the HTTP endpoint of your deployed Cloud Function.
+    # Trigger the Cloud Function
     trigger_model_training = HttpOperator(
         task_id="trigger_model_training",
         http_conn_id=HTTP_CONN_ID,
         method="POST",
-        endpoint="train-job-cluster", # Endpoint is the *path* part of the URL, or empty if URL is in Host
+        endpoint="train-job-cluster", 
         log_response=True,
+        # TF-IDF on large datasets can take a moment, so we allow 10 mins
+        execution_timeout=pendulum.duration(minutes=10), 
+        response_check=lambda response: response.status_code == 200,
     )
 
-    # Define the workflow
-    setup_schema_task = setup_schema()  # Call the task function
-    setup_schema_task >> trigger_model_training # Set dependency
+    setup_schema() >> trigger_model_training
 
-# Instantiate the DAG
 job_clustering_pipeline()

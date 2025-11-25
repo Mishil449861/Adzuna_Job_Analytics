@@ -1,10 +1,10 @@
 import functions_framework
 import pandas as pd
 import joblib
-import io
+import re
 from datetime import datetime
 from google.cloud import bigquery, storage
-from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 
 # --- Configuration ---
@@ -13,39 +13,38 @@ DATASET_ID = "ba882_jobs"
 JOBS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.jobs"
 SKILLS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.job_skills"
 CLUSTER_TABLE = f"{PROJECT_ID}.{DATASET_ID}.job_clusters"
+REGISTRY_TABLE = f"{PROJECT_ID}.{DATASET_ID}.cluster_registry" # NEW: Stores cluster names
 GCS_BUCKET = "adzuna-bucket"
-MODEL_VERSION = f"kmeans_k10_{datetime.now().strftime('%Y%m%d')}"
-KEY_FILE = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json" # Assumes function uses same service account
+MODEL_VERSION = f"tfidf_k8_{datetime.now().strftime('%Y%m%d')}"
 
 # --- Queries ---
+# We need the Title now to determine Seniority
 JOBS_QUERY = f"SELECT job_id, title FROM `{JOBS_TABLE}`"
 SKILLS_QUERY = f"SELECT source_job_id, skill_name FROM `{SKILLS_TABLE}`"
 
-def pipe_tokenizer(s):
-    """Helper function to tokenize the skill string"""
-    return s.split('|')
+# --- Helper Functions ---
+def extract_seniority(title):
+    """Simple rule-based extraction for seniority."""
+    t = str(title).lower()
+    if 'senior' in t or 'lead' in t or 'principal' in t or 'sr.' in t or 'manager' in t:
+        return 'Senior'
+    elif 'junior' in t or 'entry' in t or 'intern' in t or 'jr.' in t:
+        return 'Junior'
+    return 'Mid-Level' # Default
 
 @functions_framework.http
 def train_cluster_model(request):
     """
     HTTP-triggered Cloud Function to:
     1. Load data from BigQuery
-    2. Train K-Means clustering model
-    3. Save model artifacts to GCS
-    4. Save cluster assignments to BigQuery
+    2. Extract Seniority & Skills
+    3. Train TF-IDF + K-Means model
+    4. Auto-Label Clusters
+    5. Save results back to BigQuery & GCS
     """
     print("Starting job clustering model training...")
     
-    # Authenticate and create clients
-    # Note: In a real Cloud Function, you'd typically use the function's
-    # runtime service account, not a key file. But for simplicity, we
-    # can re-use the one from Airflow *if* it's built into the function's container.
-    # A better way is to grant the function's service account
-    # "BigQuery Data Editor" and "Storage Object Admin" roles.
-    
-    # For this plan, we'll assume the function's runtime service account
-    # has the required IAM roles (BigQuery Data Editor, Storage Object Admin).
-    
+    # Initialize Clients
     bq_client = bigquery.Client(project=PROJECT_ID)
     storage_client = storage.Client(project=PROJECT_ID)
     
@@ -58,73 +57,110 @@ def train_cluster_model(request):
         print(f"Error loading data from BigQuery: {e}")
         return (f"BigQuery load error: {e}", 500)
 
-    # 2. Process data (from your notebook)
+    # 2. Process Data & Merge
     print("Processing data...")
+    # Merge skills into jobs
     jobs_merged = jobs_df.merge(
         skills_df,
         left_on="job_id",
         right_on="source_job_id",
-        how="left"
+        how="inner" # Keep only jobs with skills
     )
-    jobs_with_skills = jobs_merged[jobs_merged['skill_name'].notna()].copy()
-    job_skill_groups = (
-        jobs_with_skills
-        .groupby('job_id')['skill_name']
-        .apply(lambda x: list(set(x.dropna())))
-        .reset_index()
-    )
-    job_skill_groups['skill_text'] = job_skill_groups['skill_name'].apply(lambda x: '|'.join(x))
 
-    if job_skill_groups.empty:
+    # Group skills by job: Result is one row per job with a list of skills
+    job_group = jobs_merged.groupby(['job_id', 'title'])['skill_name'].apply(lambda x: list(set(x))).reset_index()
+    
+    if job_group.empty:
         return ("No jobs with skills found to cluster.", 200)
 
-    # 3. Train K-Means model (from your notebook)
-    print("Training K-Means model...")
-    vectorizer = CountVectorizer(tokenizer=pipe_tokenizer, binary=True)
-    X = vectorizer.fit_transform(job_skill_groups['skill_text'])
+    # 3. Feature Engineering: Inject Seniority Tags
+    processed_text = []
+    seniority_levels = []
     
-    kmeans = KMeans(n_clusters=10, random_state=42, n_init=10)
-    job_skill_groups['cluster_id'] = kmeans.fit_predict(X)
+    for _, row in job_group.iterrows():
+        # Get seniority
+        level = extract_seniority(row['title'])
+        seniority_levels.append(level)
+        
+        # Create text for model: "python sql spark tag_senior"
+        skills_str = " ".join(row['skill_name'])
+        rich_text = f"{skills_str} tag_{level.lower()}"
+        processed_text.append(rich_text)
+        
+    job_group['seniority'] = seniority_levels
 
-    # 4. Save model artifacts to GCS
+    # 4. Train Model (TF-IDF + K-Means)
+    print("Training TF-IDF and K-Means...")
+    
+    # TF-IDF Vectorizer
+    vectorizer = TfidfVectorizer(max_features=1000, stop_words='english', min_df=0.01, max_df=0.85)
+    tfidf_matrix = vectorizer.fit_transform(processed_text)
+    
+    # K-Means
+    NUM_CLUSTERS = 8
+    kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init=10)
+    job_group['cluster_id'] = kmeans.fit_predict(tfidf_matrix)
+
+    # 5. Interpretability: Name the Clusters
+    print("Generating cluster labels...")
+    common_words = vectorizer.get_feature_names_out()
+    centroids = kmeans.cluster_centers_
+    registry_rows = []
+    
+    for i in range(NUM_CLUSTERS):
+        # Find top 5 terms for this cluster center
+        top_indices = centroids[i].argsort()[-5:][::-1]
+        top_terms = [common_words[ind] for ind in top_indices]
+        terms_str = ", ".join(top_terms)
+        
+        # Naming Logic
+        name = "General Data Role"
+        if "tag_senior" in terms_str: name = "Senior "
+        elif "tag_junior" in terms_str: name = "Junior "
+        else: name = ""
+            
+        if "learning" in terms_str or "torch" in terms_str or "model" in terms_str:
+            name += "ML Engineer"
+        elif "tableau" in terms_str or "visualization" in terms_str or "dashboard" in terms_str:
+            name += "Data Analyst"
+        elif "spark" in terms_str or "hadoop" in terms_str or "pipeline" in terms_str:
+            name += "Data Engineer"
+        else:
+            name += "Tech Role"
+
+        registry_rows.append({
+            "cluster_id": i,
+            "cluster_name": name.strip(),
+            "top_terms": terms_str,
+            "updated_at": datetime.utcnow()
+        })
+
+    # 6. Save Artifacts to GCS
     print(f"Saving artifacts to GCS bucket {GCS_BUCKET}...")
     bucket = storage_client.bucket(GCS_BUCKET)
     
-    # Save Vectorizer
-    blob_vect = bucket.blob(f"ml_artifacts/{MODEL_VERSION}/count_vectorizer.pkl")
+    blob_vect = bucket.blob(f"ml_artifacts/{MODEL_VERSION}/tfidf_vectorizer.pkl")
     with blob_vect.open("wb") as f:
         joblib.dump(vectorizer, f)
         
-    # Save Model
     blob_model = bucket.blob(f"ml_artifacts/{MODEL_VERSION}/kmeans_model.pkl")
     with blob_model.open("wb") as f:
         joblib.dump(kmeans, f)
 
-    # 5. Save cluster assignments to BigQuery
-    print(f"Saving cluster assignments to {CLUSTER_TABLE}...")
-    output_df = job_skill_groups[['job_id', 'cluster_id']].copy()
-    output_df['model_version'] = MODEL_VERSION
+    # 7. Save Results to BigQuery
+    # A. Save Assignments (Job -> Cluster)
+    print(f"Saving assignments to {CLUSTER_TABLE}...")
+    output_df = job_group[['job_id', 'cluster_id', 'seniority']].copy()
     output_df['processed_at'] = datetime.utcnow()
     
-    # Configure the load job
-    job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE", # Overwrite table each time
-        schema=[
-            bigquery.SchemaField("job_id", "STRING"),
-            bigquery.SchemaField("cluster_id", "INTEGER"),
-            bigquery.SchemaField("model_version", "STRING"),
-            bigquery.SchemaField("processed_at", "TIMESTAMP"),
-        ]
-    )
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    job = bq_client.load_table_from_dataframe(output_df, CLUSTER_TABLE, job_config=job_config)
+    job.result()
     
-    try:
-        load_job = bq_client.load_table_from_dataframe(
-            output_df, CLUSTER_TABLE, job_config=job_config
-        )
-        load_job.result()  # Wait for the job to complete
-    except Exception as e:
-        print(f"Error loading data into BigQuery: {e}")
-        return (f"BigQuery load error: {e}", 500)
+    # B. Save Registry (Cluster ID -> Name)
+    print(f"Saving registry to {REGISTRY_TABLE}...")
+    registry_df = pd.DataFrame(registry_rows)
+    job_reg = bq_client.load_table_from_dataframe(registry_df, REGISTRY_TABLE, job_config=job_config)
+    job_reg.result()
 
-    print(f"Successfully trained and saved {len(output_df)} cluster assignments.")
-    return (f"Success: Processed {len(output_df)} jobs. Model artifacts saved to {MODEL_VERSION}.", 200)
+    return (f"Success: Processed {len(output_df)} jobs into {NUM_CLUSTERS} clusters.", 200)
