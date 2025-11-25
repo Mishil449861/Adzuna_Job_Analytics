@@ -99,7 +99,7 @@ def train_job_cluster(request):
     })
 
     df_clusters.to_gbq(
-        f"{PROJECT_ID}.{DATASET}.job_clusters",
+        destination_table="ba882_jobs.job_clusters",
         project_id=PROJECT_ID,
         if_exists="replace"
     )
@@ -119,7 +119,7 @@ def train_job_cluster(request):
     })
 
     df_registry.to_gbq(
-        f"{PROJECT_ID}.{DATASET}.cluster_registry",
+        destination_table="ba882_jobs.job_clusters",
         project_id=PROJECT_ID,
         if_exists="replace"
     )
@@ -137,7 +137,7 @@ def train_job_cluster(request):
     }])
 
     df_metrics.to_gbq(
-        f"{PROJECT_ID}.{DATASET}.model_metrics",
+        destination_table="ba882_jobs.job_clusters",
         project_id=PROJECT_ID,
         if_exists="append"
     )
