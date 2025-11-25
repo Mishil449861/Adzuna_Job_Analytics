@@ -113,11 +113,9 @@ def read_sql_file(filename):
 
 # Read SQL content into variables
 update_skills_sql = read_sql_file("update_skills_dimension.sql")
-update_bridge_sql = read_sql_file("update_job_skills_bridge.sql")
-update_presence_sql = read_sql_file("update_company_presence.sql")
+update_bridge_sql = read_sql_file("merge_job_skills_bridge.sql")
+update_presence_sql = read_sql_file("company_presence.sql")
 update_standards_sql = read_sql_file("update_category_standards.sql")
-update_overlap_sql = read_sql_file("update_category_industry_overlap.sql")
-
 
 @dag(
     dag_id="skill_extraction_pipeline",
@@ -263,18 +261,6 @@ def skill_extraction_dag():
         configuration={
             "query": {
                 "query": update_standards_sql, 
-                "useLegacySql": False
-            }
-        },
-        gcp_conn_id=GCP_CONN_ID,
-    )
-    
-    # 5. Update Category-Industry Overlap
-    update_category_industry = BigQueryInsertJobOperator(
-        task_id="update_category_industry",
-        configuration={
-            "query": {
-                "query": update_overlap_sql, 
                 "useLegacySql": False
             }
         },
