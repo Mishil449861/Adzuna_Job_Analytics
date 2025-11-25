@@ -23,9 +23,10 @@ METRICS_TABLE = f"{PROJECT_ID}.{DATASET_ID}.model_metrics"
 QUALITY_THRESHOLD = 0.03
 NUM_CLUSTERS = 8
 
-# -------------------------------------------------------------------
-# Helper: Extract top terms per cluster for naming
-# -------------------------------------------------------------------
+
+# ----------------------------------------------------
+# Helper → Extract top terms per cluster for naming
+# ----------------------------------------------------
 def extract_cluster_terms(tfidf_matrix, labels, vectorizer, top_n=8):
     feature_names = np.array(vectorizer.get_feature_names_out())
     clusters = {}
@@ -47,19 +48,18 @@ def extract_cluster_terms(tfidf_matrix, labels, vectorizer, top_n=8):
     return clusters
 
 
-# -------------------------------------------------------------------
-# MAIN FUNCTION
-# -------------------------------------------------------------------
+# ----------------------------------------------------
+# MAIN ENTRYPOINT
+# ----------------------------------------------------
 @functions_framework.http
 def train_cluster_model(request):
     run_id = datetime.utcnow().strftime("%Y%m%d-%H%M")
 
     bq = bigquery.Client(project=PROJECT_ID)
-    storage_client = storage.Client(project=PROJECT_ID)
 
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
     # 1. LOAD DATA
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
     try:
         jobs_df = bq.query(
             f"SELECT job_id, title FROM `{JOBS_TABLE}`"
@@ -75,23 +75,25 @@ def train_cluster_model(request):
     merged = jobs_df.merge(skills_df, left_on="job_id", right_on="source_job_id")
     grouped = merged.groupby(["job_id", "title"])["skill_name"].apply(list).reset_index()
 
-    # Process text
     processed_text = [
         " ".join(row.skill_name).lower() + " " + row.title.lower()
         for row in grouped.itertuples()
     ]
 
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
     # 2. TF-IDF
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
     vectorizer = TfidfVectorizer(
-        max_features=1000, stop_words="english", min_df=0.01, max_df=0.85
+        max_features=1000,
+        stop_words="english",
+        min_df=0.01,
+        max_df=0.85
     )
     tfidf_matrix = vectorizer.fit_transform(processed_text)
 
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
     # 3. TRAIN MODELS
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
     kmeans = KMeans(n_clusters=NUM_CLUSTERS, n_init=10, random_state=42)
     labels_kmeans = kmeans.fit_predict(tfidf_matrix)
     score_kmeans = silhouette_score(tfidf_matrix, labels_kmeans, sample_size=5000)
@@ -107,9 +109,9 @@ def train_cluster_model(request):
         labels_hier = None
         score_hier = -1
 
-    # -------------------------------------------------------------------
-    # 4. SELECT WINNER
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
+    # 4. MODEL SELECTION
+    # ----------------------------------------------------
     if score_hier > score_kmeans:
         winner_name = "Hierarchical"
         winner_score = score_hier
@@ -121,9 +123,6 @@ def train_cluster_model(request):
 
     MODEL_VERSION = f"{winner_name}_v_{run_id}"
 
-    if winner_score < QUALITY_THRESHOLD:
-        print("WARNING: Low silhouette score.")
-
     grouped["cluster_id"] = winner_labels
     grouped["model_version"] = MODEL_VERSION
     grouped["processed_at"] = datetime.utcnow()
@@ -131,14 +130,14 @@ def train_cluster_model(request):
     num_jobs_trained = len(grouped)
     num_clusters = NUM_CLUSTERS
 
-    # -------------------------------------------------------------------
-    # 5. EXTRACT TOP TERMS (CLUSTER LABELING)
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
+    # 5. CLUSTER NAMING (TOP TERMS)
+    # ----------------------------------------------------
     cluster_terms = extract_cluster_terms(tfidf_matrix, winner_labels, vectorizer)
 
-    # -------------------------------------------------------------------
-    # 5B. FIX: INSERT cluster_registry USING WRITE_APPEND (NOT TRUNCATE)
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
+    # 5B. FIXED → ALWAYS APPEND TO cluster_registry
+    # ----------------------------------------------------
     registry_rows = [
         {
             "model_version": MODEL_VERSION,
@@ -155,16 +154,16 @@ def train_cluster_model(request):
     registry_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
     bq.load_table_from_json(registry_rows, REGISTRY_TABLE, job_config=registry_cfg).result()
 
-    # -------------------------------------------------------------------
-    # 6. WRITE CLUSTER ASSIGNMENTS (TRUNCATE OK)
-    # -------------------------------------------------------------------
+    # ----------------------------------------------------
+    # 6. WRITE CLUSTER ASSIGNMENTS (TRUNCATE)
+    # ----------------------------------------------------
     job_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     bq.load_table_from_dataframe(grouped, CLUSTER_TABLE, job_cfg).result()
 
-    # -------------------------------------------------------------------
-    # 7. FIX: INSERT model_metrics USING WRITE_APPEND
-    # -------------------------------------------------------------------
-    metric_row = [{
+    # ----------------------------------------------------
+    # 7. FIXED → ALWAYS APPEND TO model_metrics
+    # ----------------------------------------------------
+    metrics_row = [{
         "model_version": MODEL_VERSION,
         "run_date": datetime.utcnow().isoformat(),
         "silhouette_score": float(winner_score),
@@ -174,6 +173,6 @@ def train_cluster_model(request):
     }]
 
     metrics_cfg = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    bq.load_table_from_json(metric_row, METRICS_TABLE, metrics_cfg).result()
+    bq.load_table_from_json(metrics_row, METRICS_TABLE, metrics_cfg).result()
 
     return (f"Done. Winner: {winner_name} (Score={winner_score:.4f})", 200)
