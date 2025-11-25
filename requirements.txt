@@ -12,3 +12,4 @@ google-cloud-storage
 scikit-learn
 joblib
 apache-airflow-providers-http
+pandas-gbq 
