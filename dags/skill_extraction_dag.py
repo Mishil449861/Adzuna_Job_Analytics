@@ -18,6 +18,7 @@ import pendulum
 import spacy
 import os
 import re
+import logging # Added for logging
 from spacy.pipeline import EntityRuler
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -98,8 +99,25 @@ SOURCE_ID_COL = "job_id"
 SOURCE_TEXT_COL = "description"
 NEW_KEY_FILENAME = "ba882-team4-474802-bee53a65f2ac.json"
 
-# --- SQL Paths ---
+# --- SQL Paths and Reading ---
 SQL_DIR = "/usr/local/airflow/include/sql"
+
+# Helper to read SQL files safely
+def read_sql_file(filename):
+    try:
+        with open(os.path.join(SQL_DIR, filename), 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        logging.error(f"SQL file not found: {filename}")
+        return ""
+
+# Read SQL content into variables
+update_skills_sql = read_sql_file("update_skills_dimension.sql")
+update_bridge_sql = read_sql_file("update_job_skills_bridge.sql")
+update_presence_sql = read_sql_file("update_company_presence.sql")
+update_standards_sql = read_sql_file("update_category_standards.sql")
+update_overlap_sql = read_sql_file("update_category_industry_overlap.sql")
+
 
 @dag(
     dag_id="skill_extraction_pipeline",
@@ -201,67 +219,62 @@ def skill_extraction_dag():
 
     # --- SQL TASKS for Junction Tables ---
     # These tasks run AFTER the python extraction is complete.
-    # They maintain the "normalized" tables and junction/bridge tables.
+    # They use the SQL content read into variables at the top of the file.
     
-    # 1. Update Skills Dimension (update_skills_dimension.sql)
-    # Adds any newly found skills to the 'skills' table
+    # 1. Update Skills Dimension
     update_skills_dim = BigQueryInsertJobOperator(
         task_id="update_skills_dim",
         configuration={
             "query": {
-                "query": "{% include 'sql/update_skills_dimension.sql' %}", 
+                "query": update_skills_sql, 
                 "useLegacySql": False
             }
         },
         gcp_conn_id=GCP_CONN_ID,
     )
 
-    # 2. Update Job-Skills Bridge (update_job_skills_bridge.sql)
-    # Links jobs to skill IDs in 'job_skills_bridge'
+    # 2. Update Job-Skills Bridge
     update_skills_bridge = BigQueryInsertJobOperator(
         task_id="update_skills_bridge",
         configuration={
             "query": {
-                "query": "{% include 'sql/update_job_skills_bridge.sql' %}", 
+                "query": update_bridge_sql, 
                 "useLegacySql": False
             }
         },
         gcp_conn_id=GCP_CONN_ID,
     )
     
-    # 3. Update Company Presence (update_company_presence.sql)
-    # Refreshes the Company-Location link
+    # 3. Update Company Presence
     update_company_presence = BigQueryInsertJobOperator(
         task_id="update_company_presence",
         configuration={
             "query": {
-                "query": "{% include 'sql/update_company_presence.sql' %}", 
+                "query": update_presence_sql, 
                 "useLegacySql": False
             }
         },
         gcp_conn_id=GCP_CONN_ID,
     )
 
-    # 4. Update Category Standards (update_category_standards.sql)
-    # Recalculates the standard skills for each category
+    # 4. Update Category Standards
     update_category_standards = BigQueryInsertJobOperator(
         task_id="update_category_standards",
         configuration={
             "query": {
-                "query": "{% include 'sql/update_category_standards.sql' %}", 
+                "query": update_standards_sql, 
                 "useLegacySql": False
             }
         },
         gcp_conn_id=GCP_CONN_ID,
     )
     
-    # 5. Update Category-Industry Overlap (update_category_industry_overlap.sql)
-    # Recalculates top companies per category
+    # 5. Update Category-Industry Overlap
     update_category_industry = BigQueryInsertJobOperator(
         task_id="update_category_industry",
         configuration={
             "query": {
-                "query": "{% include 'sql/update_category_industry_overlap.sql' %}", 
+                "query": update_overlap_sql, 
                 "useLegacySql": False
             }
         },
