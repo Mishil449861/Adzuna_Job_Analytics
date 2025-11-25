@@ -3,9 +3,9 @@ import functions_framework
 import pandas as pd
 import numpy as np
 import re
-import string
-import pickle  # <--- REQUIRED FIX
+import pickle
 from datetime import datetime
+
 from google.cloud import bigquery, storage
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
@@ -14,13 +14,12 @@ from sklearn.metrics import silhouette_score
 
 PROJECT_ID = "ba882-team4-474802"
 DATASET = "ba882_jobs"
-BUCKET_NAME = "adzuna-bucket"  # your model artifact bucket
+BUCKET_NAME = "adzuna-bucket"
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
-
 def clean(text):
     if not isinstance(text, str):
         return ""
@@ -42,9 +41,9 @@ def extract_top_terms(tfidf_matrix, terms, labels, k=10):
     return top_terms
 
 
-# -------------------------------------
+# ----------------------------
 # CLOUD FUNCTION ENTRYPOINT
-# -------------------------------------
+# ----------------------------
 @functions_framework.http
 def train_job_cluster(request):
 
@@ -53,7 +52,7 @@ def train_job_cluster(request):
     bq = bigquery.Client(project=PROJECT_ID)
     storage_client = storage.Client(project=PROJECT_ID)
 
-    # Load jobs
+    # Load job data
     print("Loading data from BigQuery...")
     df_jobs = bq.query(f"""
         SELECT job_id, job_title, job_description
@@ -68,16 +67,18 @@ def train_job_cluster(request):
 
     # Clean text
     print("Cleaning text...")
-    df_jobs["clean_text"] = df_jobs["job_title"].fillna("") + " " + df_jobs["job_description"].fillna("")
-    df_jobs["clean_text"] = df_jobs["clean_text"].apply(clean)
+    df_jobs["clean_text"] = (
+        df_jobs["job_title"].fillna("") + " " +
+        df_jobs["job_description"].fillna("")
+    ).apply(clean)
 
-    # Vectorize
-    print("Vectorizing with TF-IDF...")
+    # TF-IDF vectorization
+    print("Vectorizing text with TF-IDF...")
     vectorizer = TfidfVectorizer(max_features=5000, stop_words="english")
     X = vectorizer.fit_transform(df_jobs["clean_text"])
     terms = vectorizer.get_feature_names_out()
 
-    # Train KMeans
+    # K-Means training
     num_clusters = 10
     print(f"Training KMeans with k={num_clusters}...")
     kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init="auto")
@@ -86,11 +87,12 @@ def train_job_cluster(request):
     silhouette = float(silhouette_score(X, labels))
     print(f"Silhouette Score = {silhouette}")
 
-    # Create model version
     model_version = f"kmeans_k{num_clusters}_{datetime.utcnow().strftime('%Y%m%d')}"
 
-    # Save cluster assignments
-    print("Preparing job_clusters output...")
+    # ----------------------------
+    # SAVE job_clusters TABLE
+    # ----------------------------
+    print("Saving job_clusters...")
     df_clusters = pd.DataFrame({
         "job_id": df_jobs["job_id"],
         "cluster_id": labels,
@@ -104,10 +106,12 @@ def train_job_cluster(request):
         if_exists="replace"
     )
 
-    print("Saved job_clusters")
+    print("Saved job_clusters.")
 
-    # Extract TF-IDF names
-    print("Extracting top TF-IDF terms...")
+    # ----------------------------
+    # SAVE cluster_registry TABLE
+    # ----------------------------
+    print("Extracting top TF-IDF terms for registry...")
     cluster_terms = extract_top_terms(X, terms, labels)
 
     df_registry = pd.DataFrame({
@@ -118,15 +122,18 @@ def train_job_cluster(request):
         "updated_at": datetime.utcnow()
     })
 
+    print("Saving cluster_registry...")
     df_registry.to_gbq(
-        destination_table="ba882_jobs.job_clusters",
+        destination_table="ba882_jobs.cluster_registry",
         project_id=PROJECT_ID,
         if_exists="replace"
     )
+    print("Saved cluster_registry.")
 
-    print("Saved cluster_registry")
-
-    # Save model metrics
+    # ----------------------------
+    # SAVE model_metrics TABLE
+    # ----------------------------
+    print("Saving model_metrics...")
     df_metrics = pd.DataFrame([{
         "model_version": model_version,
         "run_date": datetime.utcnow(),
@@ -137,19 +144,23 @@ def train_job_cluster(request):
     }])
 
     df_metrics.to_gbq(
-        destination_table="ba882_jobs.job_clusters",
+        destination_table="ba882_jobs.model_metrics",
         project_id=PROJECT_ID,
         if_exists="append"
     )
+    print("Saved model_metrics.")
 
-    print("Saved model_metrics")
-
-    # Save artifacts to Cloud Storage
+    # ----------------------------
+    # SAVE MODEL ARTIFACTS TO GCS
+    # ----------------------------
     print("Saving model artifacts to GCS...")
     bucket = storage_client.bucket(BUCKET_NAME)
     blob = bucket.blob(f"models/{model_version}/kmeans.pkl")
     blob.upload_from_string(pickle.dumps(kmeans))
+    print(f"Saved model under models/{model_version}/kmeans.pkl")
 
-    print(f"Model artifacts saved under {model_version}")
-
-    return (f"Success: Processed {len(df_jobs)} jobs. Model version: {model_version}.", 200)
+    return (
+        f"Success: Processed {len(df_jobs)} jobs. "
+        f"Model version: {model_version}.",
+        200
+    )
