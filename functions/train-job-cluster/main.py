@@ -55,7 +55,7 @@ def train_job_cluster(request):
     # Load job data
     print("Loading data from BigQuery...")
     df_jobs = bq.query(f"""
-        SELECT job_id, job_title, description as job_description
+        SELECT job_id, title AS job_title, description as job_description
         FROM `{PROJECT_ID}.{DATASET}.jobs`
         WHERE description IS NOT NULL
     """).to_dataframe()
