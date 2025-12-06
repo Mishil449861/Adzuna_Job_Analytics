@@ -9,16 +9,15 @@ FUNCTION_NAME = "train_job_cluster"
 
 with DAG(
     dag_id="company_matching_daily",
-    # UPDATED: 'schedule_interval' is renamed to 'schedule' in newer Airflow versions
-    schedule="0 19 * * *", 
-    start_date=datetime(2025, 1, 1), 
+    schedule="0 19 * * *",
+    start_date=datetime(2025, 1, 1),
     catchup=False,
     tags=["clustering", "cloud-function", "machine-learning"],
     default_args={
         "owner": "airflow",
         "retries": 1,
-        "retry_delay": timedelta(minutes=5)
-    }
+        "retry_delay": timedelta(minutes=5),
+    },
 ):
 
     run_clustering = CloudFunctionInvokeFunctionOperator(
@@ -26,7 +25,8 @@ with DAG(
         project_id=PROJECT_ID,
         location=LOCATION,
         function_id=FUNCTION_NAME,
-        input_data={},  # Function expects no JSON input, pulls directly from BQ
+        input_data={},
+        gcp_conn_id=None,       # ← THIS FIXES YOUR ERROR
     )
 
     run_clustering
