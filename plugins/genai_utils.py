@@ -1,44 +1,32 @@
 # plugins/genai_utils.py
-import os
 import json
 import logging
-import time
+import google.generativeai as genai
+from google.cloud import bigquery
 import pandas as pd
-from google.cloud import bigquery, secretmanager
-from openai import OpenAI
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-# -----------------------------
-# SECRET MANAGER
-# -----------------------------
-def load_openai_key(project_id, secret_name="OPEN_AI_API", version="1"):
-    """Loads API key from Google Secret Manager."""
-    client = secretmanager.SecretManagerServiceClient()
-    secret_path = f"projects/{project_id}/secrets/{secret_name}/versions/{version}"
-    response = client.access_secret_version(name=secret_path)
-    return response.payload.data.decode("utf-8")
+def get_gemini_client(api_key):
+    """Configures the Gemini Client."""
+    genai.configure(api_key=api_key)
+    return genai
 
-
-def get_openai_client(project_id):
-    """Builds OpenAI client using Secret Manager."""
-    api_key = load_openai_key(project_id)
-    return OpenAI(api_key=api_key)
-
-# -----------------------------
-# FETCH DATA FROM BIGQUERY
-# -----------------------------
 def fetch_unprocessed_jobs(project_id, dataset_id):
+    """
+    Fetches jobs from the main jobs table that do NOT exist 
+    in the job_enrichment table yet.
+    """
     client = bigquery.Client(project=project_id)
+    # Check if job_enrichment exists; if not, fetch everything.
+    # We use a LEFT JOIN to find jobs where e.job_id IS NULL.
     query = f"""
         SELECT 
             j.job_id,
             j.title,
-            j.description,
-            j.company_name,
-            j.city,
-            j.state
+            j.description
         FROM `{project_id}.{dataset_id}.jobs` j
         LEFT JOIN `{project_id}.{dataset_id}.job_enrichment` e
         ON j.job_id = e.job_id
@@ -47,75 +35,53 @@ def fetch_unprocessed_jobs(project_id, dataset_id):
     """
     return client.query(query).to_dataframe()
 
-# -----------------------------
-# EMBEDDINGS
-# -----------------------------
-def generate_embeddings_batch(text_list, project_id, model="text-embedding-3-small"):
-    client = get_openai_client(project_id)
+def generate_embeddings_batch(text_list, api_key, model="models/text-embedding-004"):
+    """Generates embeddings for a batch of text."""
+    genai = get_gemini_client(api_key)
     embeddings = []
-
+    
     for text in text_list:
         try:
             clean_text = text[:9000] if text else ""
-            response = client.embeddings.create(
+            result = genai.embed_content(
                 model=model,
-                input=clean_text
+                content=clean_text
             )
-            embeddings.append(response.data[0].embedding)
-            time.sleep(0.3)
+            embeddings.append(result['embedding'])
+            time.sleep(0.5) 
         except Exception as e:
             logging.error(f"Embedding failed: {e}")
             embeddings.append(None)
-
+            
     return embeddings
 
-# -----------------------------
-# EXTRACT STRUCTURED JOB INFO
-# -----------------------------
-def extract_job_details(text, project_id):
-    client = get_openai_client(project_id)
-
-    prompt = f"""
-    Extract structured information from the job description below
-    and return ONLY valid JSON.
-
-    Required fields:
-    - extracted_skills (list of strings)
-    - years_experience_min (integer, or 0)
-    - years_experience_max (integer, or 0)
-    - education_level (string: Bachelors, Masters, PhD, None)
-    - benefits (list of strings)
-    - tech_stack (list of tools/technologies)
-
-    Job Description:
-    {text[:9000]}
+def extract_job_details(text, api_key):
     """
-
+    Uses Gemini to extract structured JSON data from job descriptions.
+    """
+    genai = get_gemini_client(api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    
+    prompt = f"""
+    Analyze the following job description and extract the data into JSON format.
+    Fields required: extracted_skills, years_experience_min, years_experience_max, education_level, benefits, tech_stack.
+    
+    Job Description:
+    {text[:10000]}
+    """
+    
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
-        )
-
-        return json.loads(response.choices[0].message["content"])
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
     except Exception as e:
         logging.error(f"Extraction failed: {e}")
-        return {
-            "extracted_skills": [],
-            "years_experience_min": 0,
-            "years_experience_max": 0,
-            "education_level": None,
-            "benefits": [],
-            "tech_stack": []
-        }
+        return {}
 
-# -----------------------------
-# MAIN PROCESSING LOGIC
-# -----------------------------
-def process_genai_data(project_id, dataset_id):
+# --- CRITICAL FIX: Add api_key here ---
+def process_genai_data(project_id, dataset_id, api_key):
+    """Main function to orchestrate the flow."""
+    
+    # 1. Get Data
     df = fetch_unprocessed_jobs(project_id, dataset_id)
     if df.empty:
         logging.info("No new jobs to process.")
@@ -125,41 +91,55 @@ def process_genai_data(project_id, dataset_id):
 
     embeddings_data = []
     enrichment_data = []
-
-    for _, row in df.iterrows():
+    
+    # 2. Iterate and Process
+    for index, row in df.iterrows():
         full_text = f"{row['title']} {row['description']}"
-
-        # A. Embeddings
-        emb = generate_embeddings_batch([full_text], project_id)[0]
+        
+        # Pass api_key to internal functions
+        emb = generate_embeddings_batch([full_text], api_key)[0]
+        
         if emb:
             embeddings_data.append({
-                "job_id": row["job_id"],
+                "job_id": row['job_id'],
                 "embedding_vector": emb,
-                "model_name": "text-embedding-3-small",
+                "model_name": "text-embedding-004",
                 "created_at": pd.Timestamp.now()
             })
 
-        # B. Job Enrichment
-        details = extract_job_details(row["description"], project_id)
-        details["job_id"] = row["job_id"]
-        details["processed_at"] = pd.Timestamp.now()
-        enrichment_data.append(details)
+        details = extract_job_details(row['description'], api_key)
+        if details:
+            details['job_id'] = row['job_id']
+            details['processed_at'] = pd.Timestamp.now()
+            enrichment_data.append(details)
 
-    # WRITE TO BIGQUERY
+    # 3. Write to BigQuery (Robust Merge)
     client = bigquery.Client(project=project_id)
 
+    def merge_data(df, table_name, primary_key="job_id"):
+        if df.empty: return
+        temp_table_id = f"{project_id}.{dataset_id}.temp_{table_name}_{int(time.time())}"
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE", autodetect=True)
+        client.load_table_from_dataframe(df, temp_table_id, job_config=job_config).result()
+
+        target_table_id = f"{project_id}.{dataset_id}.{table_name}"
+        cols = df.columns.tolist()
+        col_string = ", ".join(cols)
+        
+        query = f"""
+        MERGE `{target_table_id}` T
+        USING `{temp_table_id}` S
+        ON T.{primary_key} = S.{primary_key}
+        WHEN NOT MATCHED THEN
+          INSERT ({col_string}) VALUES ({col_string})
+        """
+        client.query(query).result()
+        client.delete_table(temp_table_id, not_found_ok=True)
+
     if embeddings_data:
-        emb_df = pd.DataFrame(embeddings_data)
-        client.load_table_from_dataframe(
-            emb_df, f"{project_id}.{dataset_id}.job_embeddings"
-        ).result()
-        logging.info(f"Uploaded {len(emb_df)} embeddings.")
+        merge_data(pd.DataFrame(embeddings_data), "job_embeddings")
 
     if enrichment_data:
-        enr_df = pd.DataFrame(enrichment_data)
-        client.load_table_from_dataframe(
-            enr_df, f"{project_id}.{dataset_id}.job_enrichment"
-        ).result()
-        logging.info(f"Uploaded {len(enr_df)} enrichment records.")
+        merge_data(pd.DataFrame(enrichment_data), "job_enrichment")
 
     return "Success"
