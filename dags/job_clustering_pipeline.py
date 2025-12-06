@@ -21,6 +21,7 @@ else:
 PROJECT_ID = "ba882-team4-474802"
 LOCATION = "us-central1"
 FUNCTION_NAME = "train_job_cluster"
+GCP_CONN_ID = "gcp_default"
 
 with DAG(
     dag_id="job_clustering_daily",

@@ -1,24 +1,39 @@
 import os
+import sys
 import logging
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
 from google.cloud import secretmanager
 from google.oauth2 import service_account
-import sys
-from genai_utils import process_genai_data
 
-# Add plugins folder to path to import the script we made in Step 2
-dag_dir = os.path.dirname(os.path.abspath(__file__))
-plugins_dir = os.path.join(os.path.dirname(dag_dir), 'plugins')
-if plugins_dir not in sys.path:
+# --- Import Fix: Setup Path BEFORE importing from plugins ---
+# 1. Get the folder where this DAG lives
+current_dir = os.path.dirname(os.path.abspath(__file__))
+# 2. Go up one level (to airflow root) and into 'plugins'
+plugins_dir = os.path.join(os.path.dirname(current_dir), 'plugins')
+
+# 3. Add to Python path if not already there
+if os.path.exists(plugins_dir) and plugins_dir not in sys.path:
     sys.path.insert(0, plugins_dir)
+else:
+    # Fallback for some setups
+    hardcoded_path = "/usr/local/airflow/plugins"
+    if hardcoded_path not in sys.path:
+        sys.path.insert(0, hardcoded_path)
 
-from genai_utils import process_genai_data
+# 4. NOW import the module (this prevents ModuleNotFoundError)
+try:
+    from genai_utils import process_genai_data
+except ImportError:
+    logging.error("Could not import genai_utils. Make sure the file exists in plugins/")
+    raise
 
 # --- Config ---
 GCP_PROJECT_ID = "ba882-team4-474802"
 BQ_DATASET_NAME = "ba882_jobs"
-SECRET_GEMINI_KEY = "OPEN_AI_API" # Make sure this exists in Secret Manager
+# Note: Ensure the secret in Secret Manager contains your GEMINI API Key
+SECRET_GEMINI_KEY = "OPEN_AI_API" 
+GCP_CONN_ID = "gcp_default"
 
 default_args = {
     'owner': 'airflow',
@@ -31,7 +46,7 @@ default_args = {
     dag_id="adzuna_genai_enrichment_v1",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule="30 0 * * *", # Runs at 12:30 AM (30 mins after your main DAG)
+    schedule="30 0 * * *", 
     catchup=False,
     tags=["genai", "embeddings", "llm", "enrichment"],
 )
@@ -51,6 +66,8 @@ def genai_enrichment_dag():
     @task
     def run_genai_processing(api_key: str):
         # Calls the utility script to process data and load to BQ
+        # CRITICAL: Ensure process_genai_data in 'plugins/genai_utils.py' 
+        # is defined as: def process_genai_data(project_id, dataset_id, api_key):
         status = process_genai_data(GCP_PROJECT_ID, BQ_DATASET_NAME, api_key)
         logging.info(f"GenAI Processing Status: {status}")
 
