@@ -12,7 +12,7 @@ with DAG(
     dag_id="job_clustering_pipeline",
     # CRON Expression for 7:00 PM Daily
     # Format: Minute (0) Hour (19) Day(*) Month(*) DayOfWeek(*)
-    schedule_interval="0 19 * * *", 
+    schedule="0 19 * * *", 
     start_date=datetime(2025, 1, 1), # Updated to 2025 to match your other DAGs
     catchup=False,
     tags=["clustering", "cloud-function", "machine-learning"],
