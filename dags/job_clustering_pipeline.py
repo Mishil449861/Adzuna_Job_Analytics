@@ -1,4 +1,6 @@
 # job_cluster_dag.py
+import os
+import sys
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.google.cloud.operators.functions import CloudFunctionInvokeFunctionOperator
