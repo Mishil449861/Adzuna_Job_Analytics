@@ -9,7 +9,7 @@ LOCATION = "us-central1"
 FUNCTION_NAME = "train_job_cluster"
 
 with DAG(
-    dag_id="job_clustering_pipeline",
+    dag_id="job_clustering_daily",
     # CRON Expression for 7:00 PM Daily
     # Format: Minute (0) Hour (19) Day(*) Month(*) DayOfWeek(*)
     schedule="0 19 * * *", 
@@ -18,7 +18,7 @@ with DAG(
     tags=["clustering", "cloud-function", "machine-learning"],
     default_args={
         "owner": "airflow",
-        "retries": 1,
+        "retries": 3,
         "retry_delay": timedelta(minutes=5)
     }
 ):

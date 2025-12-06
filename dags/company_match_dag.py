@@ -8,7 +8,7 @@ LOCATION = "us-central1"
 FUNCTION_NAME = "train_job_cluster"
 
 with DAG(
-    dag_id="job_clustering_pipeline",
+    dag_id="company_matching_daily",
     # UPDATED: 'schedule_interval' is renamed to 'schedule' in newer Airflow versions
     schedule="0 19 * * *", 
     start_date=datetime(2025, 1, 1), 
