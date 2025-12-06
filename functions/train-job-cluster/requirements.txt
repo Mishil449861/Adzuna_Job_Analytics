@@ -4,3 +4,10 @@ google-cloud-bigquery>=3.0.0
 google-cloud-storage>=2.0.0
 scikit-learn>=1.0.0
 pandas-gbq>=0.17.0
+Flask>=2.0.0
+apache-airflow-providers-google
+google-cloud-secret-manager
+google-cloud-aiplatform
+google-generativeai
+openai
+requests

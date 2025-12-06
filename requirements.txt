@@ -13,3 +13,8 @@ scikit-learn
 joblib
 apache-airflow-providers-http
 pandas-gbq 
+Flask>=2.0.0
+google-cloud-aiplatform
+google-generativeai
+openai
+requests
