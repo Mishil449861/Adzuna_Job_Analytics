@@ -1,50 +1,94 @@
-# job_cluster_dag.py
-import os
-import sys
+# FILE: dags/job_clustering_dag.py
+
 from datetime import datetime, timedelta
+import json
+import requests
 from airflow import DAG
-from airflow.providers.google.cloud.operators.functions import CloudFunctionInvokeFunctionOperator
+from airflow.operators.python import PythonOperator
+from airflow.exceptions import AirflowFailException
+import logging
+import os
 
-# --- 1. Import Fix: Add plugins folder to sys.path ---
-current_dir = os.path.dirname(os.path.abspath(__file__))
-plugins_dir = os.path.join(os.path.dirname(current_dir), 'plugins')
+# -------------------------------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------------------------------
 
-if os.path.exists(plugins_dir):
-    if plugins_dir not in sys.path:
-        sys.path.insert(0, plugins_dir)
-else:
-    # Fallback for some Airflow environments
-    hardcoded_path = "/usr/local/airflow/plugins"
-    if hardcoded_path not in sys.path:
-        sys.path.insert(0, hardcoded_path)
+# Use Composer's built-in service account (recommended)
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/etc/google/auth/application_default_credentials.json"
 
-PROJECT_ID = "ba882-team4-474802"
-LOCATION = "us-central1"
-FUNCTION_NAME = "train_job_cluster"
-GCP_CONN_ID = "gcp_default"
+# Cloud Function URLs (UPDATE with your links)
+TRAIN_CLUSTER_CF = "https://us-central1-ba882-team4-474802.cloudfunctions.net/train-job-cluster"
+SCORE_CLUSTER_CF = "https://us-central1-ba882-team4-474802.cloudfunctions.net/score-job-cluster"
+
+# -------------------------------------------------------------------------------------
+# CLOUD FUNCTION CALLERS
+# -------------------------------------------------------------------------------------
+
+def trigger_train_cluster(**kwargs):
+    """Calls the Cloud Function that trains clusters and writes results to BigQuery."""
+    payload = {"message": "run_training"}
+
+    logging.info("Triggering TRAIN cluster Cloud Function...")
+
+    try:
+        response = requests.post(TRAIN_CLUSTER_CF, json=payload, timeout=300)
+
+        if response.status_code != 200:
+            raise AirflowFailException(
+                f"Training CF failed: {response.status_code} – {response.text}"
+            )
+
+        logging.info(f"Training CF success: {response.text}")
+    except Exception as e:
+        raise AirflowFailException(f"Training Cloud Function error: {str(e)}")
+
+
+def trigger_score_cluster(**kwargs):
+    """Calls the Cloud Function that scores new jobs using stored clusters."""
+    payload = {"message": "run_scoring"}
+
+    logging.info("Triggering SCORE cluster Cloud Function...")
+
+    try:
+        response = requests.post(SCORE_CLUSTER_CF, json=payload, timeout=300)
+
+        if response.status_code != 200:
+            raise AirflowFailException(
+                f"Scoring CF failed: {response.status_code} – {response.text}"
+            )
+
+        logging.info(f"Scoring CF success: {response.text}")
+    except Exception as e:
+        raise AirflowFailException(f"Scoring Cloud Function error: {str(e)}")
+
+
+# -------------------------------------------------------------------------------------
+# DAG DEFINITION
+# -------------------------------------------------------------------------------------
 
 with DAG(
-    dag_id="job_clustering_daily",
-    # CRON Expression for 7:00 PM Daily
-    # Format: Minute (0) Hour (19) Day(*) Month(*) DayOfWeek(*)
-    schedule="0 19 * * *", 
-    start_date=datetime(2025, 1, 1), # Updated to 2025 to match your other DAGs
+    dag_id="job_clustering_pipeline",
+    description="Triggers Cloud Functions to train and score job clusters.",
+    start_date=datetime(2025, 1, 1),
+    schedule_interval="@daily",
     catchup=False,
-    tags=["clustering", "cloud-function", "machine-learning"],
+    max_threads=1,
     default_args={
-        "owner": "airflow",
+        "owner": "mishil",
         "retries": 3,
-        "retry_delay": timedelta(minutes=5)
-    }
-):
+        "retry_delay": timedelta(minutes=5),
+    },
+) as dag:
 
-    run_clustering = CloudFunctionInvokeFunctionOperator(
-        task_id="run_job_clustering_function",
-        project_id=PROJECT_ID,
-        location=LOCATION,
-        function_id=FUNCTION_NAME,
-        input_data={},  # Function expects no JSON input, pulls directly from BQ
-        gcp_conn_id=GCP_CONN_ID
+    train_cluster_task = PythonOperator(
+        task_id="train_job_clusters",
+        python_callable=trigger_train_cluster,
     )
 
-    run_clustering
+    score_cluster_task = PythonOperator(
+        task_id="score_job_clusters",
+        python_callable=trigger_score_cluster,
+    )
+
+    # ----- PIPELINE -----
+    train_cluster_task >> score_cluster_task
