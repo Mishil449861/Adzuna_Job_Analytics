@@ -44,6 +44,7 @@ with DAG(
         location=LOCATION,
         function_id=FUNCTION_NAME,
         input_data={},  # Function expects no JSON input, pulls directly from BQ
+        gcp_conn_id=GCP_CONN_ID
     )
 
     run_clustering
