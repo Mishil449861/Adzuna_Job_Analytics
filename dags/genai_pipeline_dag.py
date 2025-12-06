@@ -5,6 +5,7 @@ from airflow.decorators import dag, task
 from google.cloud import secretmanager
 from google.oauth2 import service_account
 import sys
+from genai_utils import process_genai_data
 
 # Add plugins folder to path to import the script we made in Step 2
 dag_dir = os.path.dirname(os.path.abspath(__file__))

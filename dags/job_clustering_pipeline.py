@@ -1,8 +1,20 @@
 # job_cluster_dag.py
 from datetime import datetime, timedelta
 from airflow import DAG
-# Note: Ensure you have the google provider installed: pip install apache-airflow-providers-google
 from airflow.providers.google.cloud.operators.functions import CloudFunctionInvokeFunctionOperator
+
+# --- 1. Import Fix: Add plugins folder to sys.path ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+plugins_dir = os.path.join(os.path.dirname(current_dir), 'plugins')
+
+if os.path.exists(plugins_dir):
+    if plugins_dir not in sys.path:
+        sys.path.insert(0, plugins_dir)
+else:
+    # Fallback for some Airflow environments
+    hardcoded_path = "/usr/local/airflow/plugins"
+    if hardcoded_path not in sys.path:
+        sys.path.insert(0, hardcoded_path)
 
 PROJECT_ID = "ba882-team4-474802"
 LOCATION = "us-central1"
