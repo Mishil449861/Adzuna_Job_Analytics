@@ -1,11 +1,10 @@
 # job_cluster_dag.py
 from datetime import datetime, timedelta
 from airflow import DAG
-from airflow.providers.google.cloud.operators.functions import CloudFunctionInvokeFunctionOperator
+from airflow.providers.http.operators.http import SimpleHttpOperator
 
 PROJECT_ID = "ba882-team4-474802"
-LOCATION = "us-central1"
-FUNCTION_NAME = "train_job_cluster"
+FUNCTION_URL = "https://us-east1-ba882-team4-474802.cloudfunctions.net/train_job_cluster"
 
 with DAG(
     dag_id="company_matching_daily",
@@ -15,18 +14,18 @@ with DAG(
     tags=["clustering", "cloud-function", "machine-learning"],
     default_args={
         "owner": "airflow",
-        "retries": 1,
+        "retries": 3,
         "retry_delay": timedelta(minutes=5),
     },
 ):
 
-    run_clustering = CloudFunctionInvokeFunctionOperator(
+    run_clustering = SimpleHttpOperator(
         task_id="run_job_clustering_function",
-        project_id=PROJECT_ID,
-        location=LOCATION,
-        function_id=FUNCTION_NAME,
-        input_data={},
-        gcp_conn_id=None,       # ← THIS FIXES YOUR ERROR
+        method="POST",
+        http_conn_id=None,                  # ← NO AIRFLOW CONNECTION NEEDED
+        endpoint=FUNCTION_URL,              # ← Call Cloud Function directly
+        data={},                            # Cloud Function doesn't need input
+        headers={"Content-Type": "application/json"},
     )
 
     run_clustering
