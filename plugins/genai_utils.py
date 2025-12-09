@@ -1,122 +1,141 @@
-# plugins/genai_utils.py
 import re
 import unicodedata
 import numpy as np
 from google.cloud import bigquery
 from openai import OpenAI
 
-EMBEDDING_MODEL = "text-embedding-3-large"   # upgraded
-SKILL_MODEL = "gpt-4o-mini"                   # keep same
 
-# ------------------------------------------------------
+EMBEDDING_MODEL = "text-embedding-3-large"
+SKILL_EXTRACTION_MODEL = "gpt-4o-mini"
+
+
+# --------------------------------------------------
 # Text Cleaning
-# ------------------------------------------------------
-def clean_text_basic(text: str) -> str:
+# --------------------------------------------------
+def clean_text(text: str) -> str:
     if not isinstance(text, str):
         return ""
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"(.)\1{4,}", r"\1", text)
-    text = re.sub(r"(?i)equal opportunity.*", "", text)
-    text = re.sub(r"(?i)copyright.*|all rights reserved.*", "", text)
+    text = re.sub(r"(?i)apply now.*", "", text)
+    text = re.sub(r"(?i)equal opportunity employer.*", "", text)
+    text = re.sub(r"(?i)legal disclaimer.*", "", text)
     return text.strip()
 
-# ------------------------------------------------------
-# Vector Normalization
-# ------------------------------------------------------
+
+# --------------------------------------------------
+# Normalize Vector
+# --------------------------------------------------
 def normalize_vector(v):
     v = np.array(v)
     n = np.linalg.norm(v)
     return (v / n).tolist() if n > 0 else v.tolist()
 
-# ------------------------------------------------------
-# Extract Skills (unchanged)
-# ------------------------------------------------------
-def extract_skills(client, title, description):
-    system_message = (
-        "Extract and return only a list of skills from the following job title and description. "
-        "No extra text, return as a Python list of strings."
-    )
 
-    content = f"Title: {title}\n\nDescription: {description}"
+# --------------------------------------------------
+# Skill Extraction using LLM
+# --------------------------------------------------
+def extract_skills_llm(openai_client, title: str, desc: str):
+    prompt = f"""
+    Extract the key job-relevant skills from this job posting.
+    Return them as a comma-separated list only.
 
-    resp = client.chat.completions.create(
-        model=SKILL_MODEL,
-        messages=[
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": content},
-        ],
-        max_tokens=200,
-    )
+    Job Title:
+    {title}
 
-    text = resp.choices[0].message.content.strip()
-
-    try:
-        skills = eval(text)
-        if isinstance(skills, list):
-            return skills
-    except Exception:
-        pass
-
-    return []
-
-# ------------------------------------------------------
-# Main Job Processing Pipeline
-# ------------------------------------------------------
-def process_genai_data(project_id: str, dataset_name: str, api_key: str):
-    client_bq = bigquery.Client(project=project_id)
-    openai_client = OpenAI(api_key=api_key)
-
-    source_table = f"{project_id}.{dataset_name}.raw_jobs"
-    target_table = f"{project_id}.{dataset_name}.genai_jobs"
-
-    # Get all jobs with missing embeddings
-    query = f"""
-        SELECT job_id, title, description
-        FROM `{source_table}`
-        WHERE job_id NOT IN (
-            SELECT job_id FROM `{target_table}`
-        )
+    Description:
+    {desc}
     """
 
+    resp = openai_client.chat.completions.create(
+        model=SKILL_EXTRACTION_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0
+    )
+
+    text = resp.choices[0].message["content"]
+
+    skills = [s.strip() for s in text.split(",") if len(s.strip()) > 1]
+    return skills[:20]   # cap to avoid bloated embeddings
+
+
+# --------------------------------------------------
+# MAIN PROCESS
+# --------------------------------------------------
+def process_genai_data(GCP_PROJECT_ID: str, BQ_DATASET: str, openai_key: str) -> str:
+    """
+    1. Read job postings from BigQuery
+    2. Extract skills
+    3. Clean text
+    4. Create enhanced embedding
+    5. Normalize embedding
+    6. Write back to BigQuery table job_enriched
+    """
+    client_bq = bigquery.Client(project=GCP_PROJECT_ID)
+    openai_client = OpenAI(api_key=openai_key)
+
+    # --------------------------------------------------
+    # Load source data
+    # --------------------------------------------------
+    query = f"""
+        SELECT job_id, job_title, job_description
+        FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.job_raw`
+        WHERE job_title IS NOT NULL
+    """
     rows = client_bq.query(query).result()
 
-    processed_rows = []
+    output_rows = []
 
     for row in rows:
-        job_id = row.job_id
-        title = row.title or ""
-        desc = row.description or ""
+        title = row["job_title"]
+        desc = row["job_description"]
 
-        # Clean text
-        cleaned_text = clean_text_basic(title + " " + desc)
+        # ---- Clean text ----
+        title_clean = clean_text(title)
+        desc_clean = clean_text(desc)
 
-        # Extract skills
-        skills = extract_skills(openai_client, title, desc)
-        skill_text = ", ".join(skills)
+        # ---- LLM Skill Extraction ----
+        skills = extract_skills_llm(openai_client, title_clean, desc_clean)
+        skills_text = ", ".join(skills)
 
-        # Build enhanced embedding text
-        final_text = f"{title}\n\nSkills: {skill_text}\n\n{cleaned_text}"[:32000]
+        # ---- Construct Embedding Input ----
+        enriched_text = f"""
+        Title: {title_clean}
+        Skills: {skills_text}
+        Description: {desc_clean}
+        """
 
-        # Create embedding
-        emb_resp = openai_client.embeddings.create(
+        enriched_text = enriched_text[:32000]
+
+        # ---- Embedding ----
+        emb = openai_client.embeddings.create(
             model=EMBEDDING_MODEL,
-            input=final_text
+            input=enriched_text
         )
-        vector = normalize_vector(emb_resp.data[0].embedding)
 
-        processed_rows.append({
-            "job_id": job_id,
-            "title": title,
-            "description": desc,
-            "skills": skills,
-            "embedding_vector": vector,
+        normalized_vec = normalize_vector(emb.data[0].embedding)
+
+        output_rows.append({
+            "job_id": row["job_id"],
+            "job_title": title_clean,
+            "job_description": desc_clean,
+            "skills": skills_text,
+            "embedding_vector": normalized_vec
         })
 
-    # Write to BigQuery
-    if processed_rows:
-        errors = client_bq.insert_rows_json(target_table, processed_rows)
-        if errors:
-            raise RuntimeError(f"BigQuery insert errors: {errors}")
+    # --------------------------------------------------
+    # Write results to BigQuery
+    # --------------------------------------------------
+    table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.job_enriched"
 
-    return f"Processed {len(processed_rows)} jobs"
+    job = client_bq.load_table_from_json(
+        output_rows,
+        table_id,
+        job_config=bigquery.LoadJobConfig(
+            write_disposition="WRITE_TRUNCATE"
+        )
+    )
+    job.result()
+
+    return f"Processed {len(output_rows)} job rows."
