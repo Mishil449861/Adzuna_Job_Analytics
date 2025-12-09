@@ -1,15 +1,15 @@
-# dags/genai_enrichment_dag.py  (updated)
+# dags/genai_enrichment_dag.py
 from datetime import datetime, timedelta
 import logging
 from airflow import DAG
 from airflow.decorators import task
 from google.cloud import secretmanager
 from google.oauth2 import service_account
-from plugins.genai_utils import process_genai_data  # import from plugins
+from plugins.genai_utils import process_genai_data
 
 GCP_PROJECT_ID = "ba882-team4-474802"
 BQ_DATASET_NAME = "ba882_jobs"
-SECRET_OPENAI_KEY = "OPEN_AI_API"  # Secret Manager secret name
+SECRET_OPENAI_KEY = "OPEN_AI_API"
 
 default_args = {
     'owner': 'airflow',

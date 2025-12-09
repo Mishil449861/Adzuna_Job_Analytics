@@ -1,168 +1,122 @@
-import io
-import logging
-import requests
-import pandas as pd
-from datetime import datetime
-from airflow.providers.google.cloud.hooks.gcs import GCSHook
+# plugins/genai_utils.py
+import re
+import unicodedata
+import numpy as np
+from google.cloud import bigquery
+from openai import OpenAI
 
-# --- Adzuna API Configuration ---
-COUNTRY = "us"
-BASE_URL = f"https://api.adzuna.com/v1/api/jobs/{COUNTRY}/search"
+EMBEDDING_MODEL = "text-embedding-3-large"   # upgraded
+SKILL_MODEL = "gpt-4o-mini"                   # keep same
 
-def fetch_data(app_id, app_key, pages=5, per_page=50):
-    """Fetch job listings from Adzuna API."""
-    all_results = []
-    for page in range(1, pages + 1):
-        url = (
-            f"{BASE_URL}/{page}"
-            f"?app_id={app_id}"
-            f"&app_key={app_key}"
-            f"&results_per_page={per_page}"
-            f"&what=data"
-        )
-        # --- THIS IS CODE-LEVEL LOGGING ---
-        logging.info(f"Fetching page {page}")
-        response = requests.get(url)
+# ------------------------------------------------------
+# Text Cleaning
+# ------------------------------------------------------
+def clean_text_basic(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(.)\1{4,}", r"\1", text)
+    text = re.sub(r"(?i)equal opportunity.*", "", text)
+    text = re.sub(r"(?i)copyright.*|all rights reserved.*", "", text)
+    return text.strip()
 
-        if response.status_code != 200:
-            # --- THIS IS CODE-LEVEL LOGGING ---
-            logging.error(f"Failed to fetch page {page}: {response.text[:300]}")
-            continue
-        try:
-            results = response.json().get("results", [])
-            all_results.extend(results)
-        except Exception as e:
-            logging.error(f"Error parsing page {page}: {e}")
+# ------------------------------------------------------
+# Vector Normalization
+# ------------------------------------------------------
+def normalize_vector(v):
+    v = np.array(v)
+    n = np.linalg.norm(v)
+    return (v / n).tolist() if n > 0 else v.tolist()
 
-    logging.info(f"Fetched {len(all_results)} total jobs")
-    return all_results
-
-def transform_data(records, ingest_timestamp):
-    """
-    Transform raw Adzuna data into a star schema based on the relationship table.
-    Creates 3 dimension tables (Companies, Locations, Categories)
-    and 2 fact tables (Jobs, JobStats).
-    """
-    jobs_rows, jobstats_rows = [], []
-    companies_set, locations_set, categories_set = set(), set(), set()
-    ingest_ts_str = ingest_timestamp.isoformat()
-
-    for r in records:
-        jid = r.get("id")
-        created_str = r.get("created")
-        
-        # --- Extract Foreign Keys ---
-        company_name = r.get("company", {}).get("display_name")
-        category_label = r.get("category", {}).get("label")
-        
-        # Location logic
-        loc = r.get("location", {})
-        area = loc.get("area", [])
-        city, state, country = None, None, None
-        if isinstance(area, list) and len(area) > 0:
-            country = area[0]
-            if len(area) > 1:
-                state = area[1]
-            if len(area) > 2:
-                city = area[2]
-        
-        # --- Add to Sets (for unique dimension rows) ---
-        if company_name:
-            companies_set.add(company_name)
-        if category_label:
-            categories_set.add(category_label)
-        if city or state:
-            locations_set.add((city, state, country))
-            
-        # --- Parse Timestamps / Other Logic ---
-        try:
-            created_ts = pd.to_datetime(created_str)
-        except:
-            created_ts = None
-            
-        posting_week = None
-        if created_ts:
-            try:
-                posting_week = str(created_ts.isocalendar().week)
-            except Exception:
-                pass
-
-        # 1. JOBS Table Row (with Foreign Keys)
-        jobs_rows.append({
-            "job_id": jid,
-            "title": r.get("title"),
-            "description": r.get("description"),
-            "salary_min": r.get("salary_min"),
-            "salary_max": r.get("salary_max"),
-            "created": created_ts,
-            "redirected_url": r.get("redirect_url"),
-            "ingest_data": ingest_ts_str,
-            "ingest_ts": ingest_timestamp,
-            "company_name": company_name,
-            "category_label": category_label,
-            "city": city,
-            "state": state
-        })
-        
-        # 2. JOBSTATS Table Row
-        jobstats_rows.append({
-            "job_id": jid,
-            "contract_type": r.get("contract_type"),
-            "contract_time": r.get("contract_time"),
-            "posting_week": posting_week,
-        })
-
-    # --- Create DataFrames ---
-    jobs_df = pd.DataFrame(jobs_rows)
-    jobstats_df = pd.DataFrame(jobstats_rows)
-    companies_df = pd.DataFrame([{"company_name": c} for c in companies_set])
-    locations_df = pd.DataFrame(
-        [{"city": l[0], "state": l[1], "country": l[2]} for l in locations_set]
+# ------------------------------------------------------
+# Extract Skills (unchanged)
+# ------------------------------------------------------
+def extract_skills(client, title, description):
+    system_message = (
+        "Extract and return only a list of skills from the following job title and description. "
+        "No extra text, return as a Python list of strings."
     )
-    categories_df = pd.DataFrame([{"category_label": c} for c in categories_set])
 
-    dfs = {
-        "jobs": jobs_df,
-        "jobstats": jobstats_df,
-        "companies": companies_df,
-        "locations": locations_df,
-        "categories": categories_df,
-    }
-    
-    # --- THIS IS CODE-LEVEL LOGGING ---
-    logging.info("DataFrame counts: " + " | ".join([f"{k}: {len(v)}" for k, v in dfs.items()]))
-    return dfs
+    content = f"Title: {title}\n\nDescription: {description}"
 
-def upload_dfs_to_gcs(dfs, bucket_name, ingest_timestamp, gcp_conn_id):
-    """Uploads multiple DataFrames to GCS as Parquet."""
-    gcs_hook = GCSHook(gcp_conn_id=gcp_conn_id)
-    ts_path = ingest_timestamp.strftime("%Y%m%d%H%M%S")
-    gcs_paths = {}
+    resp = client.chat.completions.create(
+        model=SKILL_MODEL,
+        messages=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": content},
+        ],
+        max_tokens=200,
+    )
 
-    for name, df in dfs.items():
-        if df.empty:
-            logging.warning(f"Skipping upload for {name}: empty DataFrame")
-            continue
-        
-        gcs_path = f"processed/{name}/{name}_{ts_path}.parquet"
-        
-        try:
-            parquet_buffer = io.BytesIO()
-            df.to_parquet(parquet_buffer, index=False, engine="pyarrow")
-            parquet_buffer.seek(0)
-            
-            gcs_hook.upload(
-                bucket_name=bucket_name,
-                object_name=gcs_path,
-                data=parquet_buffer.read(),
-                mime_type="application/octet-stream",
-            )
-            
-            gs_path_full = f"gs://{bucket_name}/{gcs_path}"
-            logging.info(f"✅ Uploaded {name} -> {gs_path_full}")
-            gcs_paths[name] = gcs_path
-        except Exception as e:
-            logging.error(f"Failed to upload {name}: {e}")
-            raise
-            
-    return gcs_paths
+    text = resp.choices[0].message.content.strip()
+
+    try:
+        skills = eval(text)
+        if isinstance(skills, list):
+            return skills
+    except Exception:
+        pass
+
+    return []
+
+# ------------------------------------------------------
+# Main Job Processing Pipeline
+# ------------------------------------------------------
+def process_genai_data(project_id: str, dataset_name: str, api_key: str):
+    client_bq = bigquery.Client(project=project_id)
+    openai_client = OpenAI(api_key=api_key)
+
+    source_table = f"{project_id}.{dataset_name}.raw_jobs"
+    target_table = f"{project_id}.{dataset_name}.genai_jobs"
+
+    # Get all jobs with missing embeddings
+    query = f"""
+        SELECT job_id, title, description
+        FROM `{source_table}`
+        WHERE job_id NOT IN (
+            SELECT job_id FROM `{target_table}`
+        )
+    """
+
+    rows = client_bq.query(query).result()
+
+    processed_rows = []
+
+    for row in rows:
+        job_id = row.job_id
+        title = row.title or ""
+        desc = row.description or ""
+
+        # Clean text
+        cleaned_text = clean_text_basic(title + " " + desc)
+
+        # Extract skills
+        skills = extract_skills(openai_client, title, desc)
+        skill_text = ", ".join(skills)
+
+        # Build enhanced embedding text
+        final_text = f"{title}\n\nSkills: {skill_text}\n\n{cleaned_text}"[:32000]
+
+        # Create embedding
+        emb_resp = openai_client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=final_text
+        )
+        vector = normalize_vector(emb_resp.data[0].embedding)
+
+        processed_rows.append({
+            "job_id": job_id,
+            "title": title,
+            "description": desc,
+            "skills": skills,
+            "embedding_vector": vector,
+        })
+
+    # Write to BigQuery
+    if processed_rows:
+        errors = client_bq.insert_rows_json(target_table, processed_rows)
+        if errors:
+            raise RuntimeError(f"BigQuery insert errors: {errors}")
+
+    return f"Processed {len(processed_rows)} jobs"
