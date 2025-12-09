@@ -1,143 +1,122 @@
 # plugins/genai_utils.py
-import logging
-from datetime import datetime
-import pandas as pd
+import re
+import unicodedata
+import numpy as np
 from google.cloud import bigquery
-from google.oauth2 import service_account
 from openai import OpenAI
-import json
-import time
 
-SERVICE_ACCOUNT_PATH = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
+EMBEDDING_MODEL = "text-embedding-3-large"   # upgraded
+SKILL_MODEL = "gpt-4o-mini"                   # keep same
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-CHAT_MODEL = "gpt-4o-mini"  # or another chat model you prefer
+# ------------------------------------------------------
+# Text Cleaning
+# ------------------------------------------------------
+def clean_text_basic(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(.)\1{4,}", r"\1", text)
+    text = re.sub(r"(?i)equal opportunity.*", "", text)
+    text = re.sub(r"(?i)copyright.*|all rights reserved.*", "", text)
+    return text.strip()
 
-def get_bq_credentials():
-    return service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_PATH,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+# ------------------------------------------------------
+# Vector Normalization
+# ------------------------------------------------------
+def normalize_vector(v):
+    v = np.array(v)
+    n = np.linalg.norm(v)
+    return (v / n).tolist() if n > 0 else v.tolist()
+
+# ------------------------------------------------------
+# Extract Skills (unchanged)
+# ------------------------------------------------------
+def extract_skills(client, title, description):
+    system_message = (
+        "Extract and return only a list of skills from the following job title and description. "
+        "No extra text, return as a Python list of strings."
     )
 
-def fetch_unprocessed_jobs(project_id, dataset_id, limit=50):
-    client = bigquery.Client(project=project_id, credentials=get_bq_credentials())
-    query = f"""
-        SELECT
-            j.job_id,
-            j.title,
-            j.description
-        FROM `{project_id}.{dataset_id}.jobs` j
-        LEFT JOIN `{project_id}.{dataset_id}.job_enrichment` e
-          ON j.job_id = e.job_id
-        WHERE e.job_id IS NULL
-        LIMIT {limit}
-    """
-    return client.query(query).to_dataframe()
+    content = f"Title: {title}\n\nDescription: {description}"
 
-def extract_skills_with_openai(openai_client: OpenAI, text: str):
-    # Ask the chat model to return a JSON list of skills only.
-    system = "You are an assistant that extracts concise skill keywords from a job description. Output only valid JSON: an array of lowercase skill strings. Do not include extra commentary."
-    user = f"Job description:\n\n{text}\n\nReturn a JSON array of the top 8 skills (single words or short phrases)."
-
-    resp = openai_client.chat.completions.create(
-        model=CHAT_MODEL,
+    resp = client.chat.completions.create(
+        model=SKILL_MODEL,
         messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user}
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": content},
         ],
         max_tokens=200,
-        temperature=0.0
     )
-    raw = resp.choices[0].message.content.strip()
 
-    # Defensive parse: try to parse JSON, fallback to simple heuristics
+    text = resp.choices[0].message.content.strip()
+
     try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            skills = [s.strip() for s in parsed if isinstance(s, str) and s.strip()]
-            return skills[:8]
+        skills = eval(text)
+        if isinstance(skills, list):
+            return skills
     except Exception:
-        logging.warning("OpenAI returned non-JSON skills: %s", raw)
+        pass
 
-    # fallback: simple token selection
-    tokens = [w.strip(".,()") for w in text.split() if len(w) > 3]
-    top = list(dict.fromkeys(tokens))[:8]
-    return top
+    return []
 
-def process_genai_data(project_id: str, dataset_id: str, api_key: str):
-    logging.info("Starting genai enrichment process")
-    df = fetch_unprocessed_jobs(project_id, dataset_id)
-    if df.empty:
-        logging.info("No new jobs to process.")
-        return "No Data"
-
+# ------------------------------------------------------
+# Main Job Processing Pipeline
+# ------------------------------------------------------
+def process_genai_data(project_id: str, dataset_name: str, api_key: str):
+    client_bq = bigquery.Client(project=project_id)
     openai_client = OpenAI(api_key=api_key)
-    bq_client = bigquery.Client(project=project_id, credentials=get_bq_credentials())
 
-    embeddings_table = f"{project_id}.{dataset_id}.job_embeddings"
-    enrichment_table = f"{project_id}.{dataset_id}.job_enrichment"
+    source_table = f"{project_id}.{dataset_name}.raw_jobs"
+    target_table = f"{project_id}.{dataset_name}.genai_jobs"
 
-    rows_embeddings = []
-    rows_enrichment = []
+    # Get all jobs with missing embeddings
+    query = f"""
+        SELECT job_id, title, description
+        FROM `{source_table}`
+        WHERE job_id NOT IN (
+            SELECT job_id FROM `{target_table}`
+        )
+    """
 
-    for _, row in df.iterrows():
-        job_id = str(row["job_id"])
-        title = row.get("title", "") or ""
-        desc = row.get("description", "") or ""
-        text_for_embedding = (title + "\n\n" + desc)[:32000]  # safe limit
+    rows = client_bq.query(query).result()
+
+    processed_rows = []
+
+    for row in rows:
+        job_id = row.job_id
+        title = row.title or ""
+        desc = row.description or ""
+
+        # Clean text
+        cleaned_text = clean_text_basic(title + " " + desc)
+
+        # Extract skills
+        skills = extract_skills(openai_client, title, desc)
+        skill_text = ", ".join(skills)
+
+        # Build enhanced embedding text
+        final_text = f"{title}\n\nSkills: {skill_text}\n\n{cleaned_text}"[:32000]
 
         # Create embedding
-        try:
-            emb_resp = openai_client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=text_for_embedding
-            )
-            embedding = emb_resp.data[0].embedding
-        except Exception as e:
-            logging.exception("Embedding generation failed for job_id %s: %s", job_id, e)
-            continue
+        emb_resp = openai_client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=final_text
+        )
+        vector = normalize_vector(emb_resp.data[0].embedding)
 
-        # Extract skills (chat)
-        try:
-            skills = extract_skills_with_openai(openai_client, desc)
-        except Exception as e:
-            logging.exception("Skill extraction failed for job_id %s: %s", job_id, e)
-            skills = []
-
-        now_ts = datetime.utcnow().isoformat()
-
-        rows_embeddings.append({
+        processed_rows.append({
             "job_id": job_id,
-            "embedding_vector": embedding,
-            "model_name": EMBEDDING_MODEL,
-            "created_at": now_ts
+            "title": title,
+            "description": desc,
+            "skills": skills,
+            "embedding_vector": vector,
         })
 
-        rows_enrichment.append({
-            "job_id": job_id,
-            "extracted_skills": skills,
-            "processed_at": now_ts
-        })
-
-        # Rate limit safety
-        time.sleep(0.2)
-
-    # Insert embeddings in bulk (use insert_rows_json)
-    if rows_embeddings:
-        table = bq_client.get_table(embeddings_table)
-        errors = bq_client.insert_rows_json(table, rows_embeddings)
+    # Write to BigQuery
+    if processed_rows:
+        errors = client_bq.insert_rows_json(target_table, processed_rows)
         if errors:
-            logging.error("Errors inserting embeddings: %s", errors)
-        else:
-            logging.info("Inserted %d embeddings.", len(rows_embeddings))
+            raise RuntimeError(f"BigQuery insert errors: {errors}")
 
-    # Insert enrichment rows (job_enrichment)
-    if rows_enrichment:
-        table_e = bq_client.get_table(enrichment_table)
-        errors_e = bq_client.insert_rows_json(table_e, rows_enrichment)
-        if errors_e:
-            logging.error("Errors inserting job_enrichment rows: %s", errors_e)
-        else:
-            logging.info("Inserted %d enrichment rows.", len(rows_enrichment))
-
-    return {"embeddings_inserted": len(rows_embeddings), "enrichment_inserted": len(rows_enrichment)}
+    return f"Processed {len(processed_rows)} jobs"
