@@ -86,7 +86,7 @@ def process_genai_data(GCP_PROJECT_ID: str, BQ_DATASET: str, openai_key: str) ->
     # -------- Load Source Data --------
     query = f"""
         SELECT job_id, job_title, job_description
-        FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.job_raw`
+        FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.jobs`
         WHERE job_title IS NOT NULL
         LIMIT 5000
     """
