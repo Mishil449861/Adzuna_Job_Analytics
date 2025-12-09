@@ -5,14 +5,20 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 from openai import AsyncOpenAI
 
-# Rate limit controller: Limits parallel requests to 10 at a time to avoid OpenAI errors
-CONCURRENCY_LIMIT = 10 
+# --- CONFIGURATION FOR RATE LIMITING ---
+# Limit parallel requests to 5 (Safe for Tier 1)
+CONCURRENCY_LIMIT = 5 
+# Forced wait time between requests to prevent spikes
+SLEEP_DELAY = 1.2 
 
 async def process_single_job(client_openai, row, semaphore):
     """
     Process a single row asynchronously with a semaphore to control concurrency.
     """
     async with semaphore:
+        # THROTTLE: Pace the requests to avoid hitting 500 RPM limit
+        await asyncio.sleep(SLEEP_DELAY)
+        
         job_text = f"Title: {row.title}\nDescription: {row.description}"
         ts = datetime.utcnow().isoformat()
         
@@ -49,7 +55,6 @@ async def process_single_job(client_openai, row, semaphore):
             }
         except Exception as e:
             print(f"Enrichment error for job {row.job_id}: {e}")
-            # Even if enrichment fails, we might want to return partial data or skip
 
         # --- 2. Embeddings (text-embedding-3-small) ---
         embed_data = None
@@ -84,8 +89,7 @@ def process_genai_data(GCP_PROJECT_ID, BQ_DATASET, gcp_service_account_json, ope
     ENRICH_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.job_enrichment"
     EMBED_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.job_embeddings"
 
-    # --- INCREMENTAL LOGIC START ---
-    # Only select jobs where 'job_id' is NOT in the enrichment table
+    # --- INCREMENTAL LOGIC ---
     query = f"""
         SELECT j.job_id, j.title, j.description
         FROM `{JOBS_TABLE}` j
@@ -94,7 +98,6 @@ def process_genai_data(GCP_PROJECT_ID, BQ_DATASET, gcp_service_account_json, ope
         WHERE j.description IS NOT NULL
           AND e.job_id IS NULL
     """
-    # --- INCREMENTAL LOGIC END ---
 
     print("Fetching new jobs from BigQuery...")
     jobs = list(client_bq.query(query).result())
@@ -120,12 +123,18 @@ def process_genai_data(GCP_PROJECT_ID, BQ_DATASET, gcp_service_account_json, ope
     # --- Insert into BigQuery ---
     if enrichment_rows:
         print(f"Inserting {len(enrichment_rows)} enrichment rows...")
-        errors1 = client_bq.insert_rows_json(ENRICH_TABLE, enrichment_rows)
-        if errors1: print(f"Enrichment Errors: {errors1}")
+        # Chunk inserts if > 1000 rows to avoid request payload limits
+        chunk_size = 500
+        for i in range(0, len(enrichment_rows), chunk_size):
+            chunk = enrichment_rows[i:i + chunk_size]
+            errors1 = client_bq.insert_rows_json(ENRICH_TABLE, chunk)
+            if errors1: print(f"Enrichment Errors (Chunk {i}): {errors1}")
 
     if embed_rows:
         print(f"Inserting {len(embed_rows)} embedding rows...")
-        errors2 = client_bq.insert_rows_json(EMBED_TABLE, embed_rows)
-        if errors2: print(f"Embedding Errors: {errors2}")
+        for i in range(0, len(embed_rows), chunk_size):
+            chunk = embed_rows[i:i + chunk_size]
+            errors2 = client_bq.insert_rows_json(EMBED_TABLE, chunk)
+            if errors2: print(f"Embedding Errors (Chunk {i}): {errors2}")
 
     return f"Success. Processed {len(jobs)} jobs."
