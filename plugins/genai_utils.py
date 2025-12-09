@@ -22,7 +22,9 @@ def process_genai_data(
         gcp_service_account_json
     )
     client_bq = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-    client_openai = OpenAI(api_key=OPEN_AI_API)
+
+    # FIX: Use the function argument, not OPEN_AI_API
+    client_openai = OpenAI(api_key=openai_key)
 
     # --- Tables ---
     JOBS_TABLE = f"{GCP_PROJECT_ID}.{BQ_DATASET}.jobs"
