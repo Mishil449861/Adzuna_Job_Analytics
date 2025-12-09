@@ -2,15 +2,14 @@ import re
 import unicodedata
 import numpy as np
 from google.cloud import bigquery
+from google.oauth2 import service_account
 from openai import OpenAI
-
 
 EMBEDDING_MODEL = "text-embedding-3-large"
 SKILL_EXTRACTION_MODEL = "gpt-4o-mini"
 
-
 # --------------------------------------------------
-# Text Cleaning
+# Clean Text
 # --------------------------------------------------
 def clean_text(text: str) -> str:
     if not isinstance(text, str):
@@ -25,7 +24,7 @@ def clean_text(text: str) -> str:
 
 
 # --------------------------------------------------
-# Normalize Vector
+# Normalize Embedding Vector
 # --------------------------------------------------
 def normalize_vector(v):
     v = np.array(v)
@@ -34,14 +33,14 @@ def normalize_vector(v):
 
 
 # --------------------------------------------------
-# Skill Extraction using LLM
+# Skill Extraction via LLM
 # --------------------------------------------------
 def extract_skills_llm(openai_client, title: str, desc: str):
     prompt = f"""
-    Extract the key job-relevant skills from this job posting.
-    Return them as a comma-separated list only.
+    Extract the key job-relevant skills from this posting.
+    Return skills ONLY as a comma-separated list.
 
-    Job Title:
+    Title:
     {title}
 
     Description:
@@ -54,34 +53,42 @@ def extract_skills_llm(openai_client, title: str, desc: str):
         temperature=0.0
     )
 
-    text = resp.choices[0].message["content"]
+    raw = resp.choices[0].message["content"]
+    skills = [s.strip() for s in raw.split(",") if 1 < len(s.strip()) < 50]
 
-    skills = [s.strip() for s in text.split(",") if len(s.strip()) > 1]
-    return skills[:20]   # cap to avoid bloated embeddings
+    return skills[:20]
 
 
 # --------------------------------------------------
-# MAIN PROCESS
+# Main Processing Flow
 # --------------------------------------------------
 def process_genai_data(GCP_PROJECT_ID: str, BQ_DATASET: str, openai_key: str) -> str:
     """
     1. Read job postings from BigQuery
-    2. Extract skills
-    3. Clean text
-    4. Create enhanced embedding
-    5. Normalize embedding
-    6. Write back to BigQuery table job_enriched
+    2. Clean text
+    3. Extract skills via OpenAI
+    4. Generate embeddings
+    5. Normalize embeddings
+    6. Write enriched rows back to BigQuery
     """
-    client_bq = bigquery.Client(project=GCP_PROJECT_ID)
+
+    # -------- Use YOUR service account credentials --------
+    key_path = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
+    credentials = service_account.Credentials.from_service_account_file(key_path)
+
+    client_bq = bigquery.Client(
+        project=GCP_PROJECT_ID,
+        credentials=credentials
+    )
+
     openai_client = OpenAI(api_key=openai_key)
 
-    # --------------------------------------------------
-    # Load source data
-    # --------------------------------------------------
+    # -------- Load Source Data --------
     query = f"""
         SELECT job_id, job_title, job_description
         FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.job_raw`
         WHERE job_title IS NOT NULL
+        LIMIT 5000
     """
     rows = client_bq.query(query).result()
 
@@ -91,24 +98,18 @@ def process_genai_data(GCP_PROJECT_ID: str, BQ_DATASET: str, openai_key: str) ->
         title = row["job_title"]
         desc = row["job_description"]
 
-        # ---- Clean text ----
         title_clean = clean_text(title)
         desc_clean = clean_text(desc)
 
-        # ---- LLM Skill Extraction ----
+        # ---- Extract skills from LLM ----
         skills = extract_skills_llm(openai_client, title_clean, desc_clean)
         skills_text = ", ".join(skills)
 
-        # ---- Construct Embedding Input ----
-        enriched_text = f"""
-        Title: {title_clean}
-        Skills: {skills_text}
-        Description: {desc_clean}
-        """
+        # ---- Construct text for embedding ----
+        enriched_text = f"Title: {title_clean}\nSkills: {skills_text}\nDescription: {desc_clean}"
+        enriched_text = enriched_text[:30000]  # token safety
 
-        enriched_text = enriched_text[:32000]
-
-        # ---- Embedding ----
+        # ---- Generate embedding ----
         emb = openai_client.embeddings.create(
             model=EMBEDDING_MODEL,
             input=enriched_text
@@ -125,7 +126,7 @@ def process_genai_data(GCP_PROJECT_ID: str, BQ_DATASET: str, openai_key: str) ->
         })
 
     # --------------------------------------------------
-    # Write results to BigQuery
+    # Write enriched rows back to BigQuery
     # --------------------------------------------------
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.job_enriched"
 

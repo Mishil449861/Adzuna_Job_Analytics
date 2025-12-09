@@ -22,7 +22,7 @@ with DAG(
     dag_id="genai_enrichment_openai_v1",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule="30 0 * * *",   # 12:30 AM UTC daily
+    schedule="30 0 * * *",   
     catchup=False,
     tags=["genai", "embeddings", "openai"],
 ) as dag:
