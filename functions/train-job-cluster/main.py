@@ -79,7 +79,7 @@ def train_job_cluster(request):
     logging.info("Running Method A: Embeddings...")
     embeddings = get_embeddings_batch(df['clean_text'].tolist())
     
-    kmeans_emb = KMeans(n_clusters=10, random_state=42)
+    kmeans_emb = KMeans(n_clusters=5, random_state=42)
     labels_emb = kmeans_emb.fit_predict(embeddings)
     score_emb = silhouette_score(embeddings, labels_emb)
     logging.info(f"Embedding Silhouette Score: {score_emb}")
@@ -90,7 +90,7 @@ def train_job_cluster(request):
     # Using Category + Company as features
     cat_features = encoder.fit_transform(df[['category_label', 'company_name']])
     
-    kmeans_cat = KMeans(n_clusters=10, random_state=42)
+    kmeans_cat = KMeans(n_clusters=5, random_state=42)
     labels_cat = kmeans_cat.fit_predict(cat_features)
     # Calculate silhouette on categorical features
     score_cat = silhouette_score(cat_features, labels_cat)
@@ -146,5 +146,5 @@ def train_job_cluster(request):
         "status": "success", 
         "winner": winner, 
         "score": final_score,
-        "clusters_created": 10
+        "clusters_created": 5
     }), 200
