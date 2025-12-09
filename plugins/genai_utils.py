@@ -94,7 +94,7 @@ def process_genai_data(
         # -----------------------------------------------------
         try:
             embed_resp = client_openai.embeddings.create(
-                model="text-embedding-3-large",
+                model="text-embedding-3-small",
                 input=job_text
             )
 
@@ -106,7 +106,7 @@ def process_genai_data(
         embed_rows.append({
             "job_id": row.job_id,
             "embedding_vector": vector,
-            "model_name": "text-embedding-3-large",
+            "model_name": "text-embedding-3-small",
             "created_at": ts
         })
 
