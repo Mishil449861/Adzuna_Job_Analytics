@@ -3,11 +3,11 @@ import openai
 import numpy as np
 
 # Initialize OpenAI
-openai_api_key = "YOUR_OPENAI_API_KEY"
+openai_api_key = "OPENAI_API_KEY"
 
 def get_text_embedding(text: str):
     """
-    Generates a 3072-dim embedding vector using OpenAI 'text-embedding-3-large'.
+    Generates a 3072-dim embedding vector using OpenAI 'text-embedding-3-small'.
     """
     if text is None or len(text.strip()) == 0:
         return np.zeros(3072)
