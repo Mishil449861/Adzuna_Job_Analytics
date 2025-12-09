@@ -1,4 +1,3 @@
-# dags/genai_enrichment_dag.py
 from datetime import datetime, timedelta
 import logging
 from airflow import DAG
@@ -10,6 +9,7 @@ from plugins.genai_utils import process_genai_data
 GCP_PROJECT_ID = "ba882-team4-474802"
 BQ_DATASET_NAME = "ba882_jobs"
 SECRET_OPENAI_KEY = "OPEN_AI_API"
+SERVICE_ACCOUNT_PATH = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
 
 default_args = {
     'owner': 'airflow',
@@ -22,15 +22,14 @@ with DAG(
     dag_id="genai_enrichment_openai_v1",
     default_args=default_args,
     start_date=datetime(2025, 1, 1),
-    schedule="30 0 * * *",   
+    schedule="30 0 * * *",
     catchup=False,
     tags=["genai", "embeddings", "openai"],
 ) as dag:
 
     @task()
     def get_openai_secret() -> str:
-        key_path = "/usr/local/airflow/include/ba882-team4-474802-bee53a65f2ac.json"
-        credentials = service_account.Credentials.from_service_account_file(key_path)
+        credentials = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH)
         client = secretmanager.SecretManagerServiceClient(credentials=credentials)
         secret_name = f"projects/{GCP_PROJECT_ID}/secrets/{SECRET_OPENAI_KEY}/versions/latest"
         response = client.access_secret_version(request={"name": secret_name})
@@ -38,7 +37,12 @@ with DAG(
 
     @task()
     def run_genai_processing(api_key: str):
-        status = process_genai_data(GCP_PROJECT_ID, BQ_DATASET_NAME, api_key)
+        status = process_genai_data(
+            GCP_PROJECT_ID,
+            BQ_DATASET_NAME,
+            SERVICE_ACCOUNT_PATH,
+            api_key
+        )
         logging.info(f"GenAI Processing Status: {status}")
 
     api_key = get_openai_secret()
